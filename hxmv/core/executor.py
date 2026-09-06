@@ -1,17 +1,23 @@
 """Executor：代码负责"到底怎么做"的执行层。
 
-V0.1 = MockVideoExecutor：不调任何视频 API，在 mock 世界里产生带
-真实感缺陷的结果（按参数概率注入），让 Critic/Refiner/Controller 有活可干。
+两个实现：
+- MockVideoExecutor：不调任何视频 API，在 mock 世界里产生带真实感缺陷的结果
+  （按参数概率注入），让 Critic/Refiner/Controller 有活可干。零依赖可跑。
+- ProviderExecutor：接真实生成服务（VideoProvider 适配器）。Task 在此投影成
+  API 请求参数（constraints → cfg_scale 等），基础设施错误抛 ProviderError 由
+  Loop 按"服务重试"处理，与质量 FAIL 分道。
+
 缺陷注入规则刻意与参数挂钩——reference_strength 越高，一致性缺陷越少，
 这样 Refiner 的"调参修正"是真实有效的，闭环才有意义。
-
-后续接真实生成器时，只需实现同一 Executor 接口，把 action 映射到 API 调用。
 """
 from __future__ import annotations
 
 import hashlib
+import os
 import random
+from dataclasses import replace
 
+from ..providers.base import ProviderError
 from .state import (
     ACTION_COMPOSE, ACTION_GENERATE_CHARACTER, ACTION_GENERATE_SCENE,
     ACTION_GENERATE_SHOT, ACTION_STORYBOARD, Task,
@@ -94,3 +100,54 @@ class MockVideoExecutor(Executor):
                     "shots": task.input.get("shots", []), "cost_units": cost}
 
         return {"cost_units": cost}
+
+
+# ---- 工程参数 → API 请求参数的投影表（ProviderExecutor 用） ----
+# 左侧是闭环内部语义（Refiner 调的就是这些），右侧是生成服务的消费格式。
+# 真实 API 的键名不同就在这里改，别动 Refiner/Controller。
+_PROJECTION = {
+    ("constraints", "reference_strength"): ("input", "cfg_scale", lambda v: round(float(v) * 10, 1)),
+    ("constraints", "scene_strength"):     ("input", "scene_cfg", lambda v: round(float(v) * 10, 1)),
+    ("constraints", "motion_scale"):        ("input", "motion_strength", lambda v: float(v)),
+    ("input", "audio_gain_db"):             ("input", "audio_gain_db", lambda v: float(v)),
+    ("input", "fps"):                       ("input", "fps", lambda v: int(v)),
+    ("input", "resolution"):                ("input", "resolution", lambda v: v),
+}
+
+
+class ProviderExecutor(Executor):
+    """把 Task 投影成 API 请求参数后交给 VideoProvider 执行。"""
+
+    def __init__(self, provider):
+        self.provider = provider
+
+    def execute(self, task: Task) -> dict:
+        api_task = replace(task)
+        api_task.input = dict(task.input)          # 浅拷贝，不污染原 Task（审计干净）
+        api_task.constraints = dict(task.constraints)
+        for (src_where, src_key), (dst_where, dst_key, fn) in _PROJECTION.items():
+            src = task.constraints if src_where == "constraints" else task.input
+            if src_key in src:
+                (api_task.input if dst_where == "input" else api_task.constraints)[dst_key] = fn(src[src_key])
+        # 记录投影，便于查"哪个内部参数驱动了 API 的哪个参数"
+        api_task.input["_projected"] = {
+            k: (api_task.input if w == "input" else api_task.constraints).get(k)
+            for (w, k), *_ in _PROJECTION.items()}
+        return self.provider.generate(api_task)
+
+
+def make_executor():
+    """工厂：HXMV_PROVIDER=fake/kling → ProviderExecutor；否则/失败落 Mock。"""
+    name = os.environ.get("HXMV_PROVIDER", "").lower()
+    if name:
+        try:
+            if name == "fake":
+                from ..providers.fake_api import FakeApiProvider
+                return ProviderExecutor(FakeApiProvider())
+            if name in ("kling", "klingai"):
+                from ..providers.kling_example import KlingStyleProvider
+                return ProviderExecutor(KlingStyleProvider())
+            raise ProviderError(f"未知 provider: {name}", retryable=False)
+        except ProviderError as e:
+            print(f"⚠ {e} → 降级 MockVideoExecutor")
+    return MockVideoExecutor()

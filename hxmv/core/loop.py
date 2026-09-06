@@ -14,11 +14,12 @@ while not goal_reached:
 """
 from __future__ import annotations
 
+from ..providers.base import ProviderError
 from .brain import Brain
 from .context import ContextManager
 from .controller import Controller
 from .critic import PipelineCritic
-from .executor import MockVideoExecutor
+from .executor import make_executor
 from .planner import make_planner
 from .state import ExecutionState, TaskStatus
 
@@ -75,7 +76,7 @@ def run(goal: str,
         else:
             print("  🧠 大脑：空（本次运行将开始积累经验）")
 
-    executor = executor or MockVideoExecutor()
+    executor = executor or make_executor()
     critic = critic or PipelineCritic()
     controller = controller or Controller(brain=brain)
     context = context or ContextManager()
@@ -95,12 +96,34 @@ def run(goal: str,
             state.tasks.append(task)  # 登记完整任务清单
         state.current = task
 
-        # 2) 执行 → 3) 观察（三层 Critic 合并报告）→ 4) 判断推进
+        # 2) 执行：基础设施错误（ProviderError）按"服务重试"处理，
+        #    与质量 FAIL 分道——不消耗 Refiner 的重试额度
         if verbose:
             print(f"\n▶ {task.action} {task.task_id}"
                   + (f"  prompt={task.input.get('prompt', '')[:24]}…" if task.input.get("prompt") else "")
                   + (f"  [第 {task.retry_policy.get('attempts', 0)+1} 次尝试]" if task.retry_policy.get("attempts") else ""))
-        result = executor.execute(task)
+        result = None
+        infra_retried = 0
+        while infra_retried < 4:
+            try:
+                result = executor.execute(task)
+                break
+            except ProviderError as e:
+                state.budget.used += e.cost_units  # 部分 API 失败也计费
+                infra_retried += 1
+                state.log(f"⚠ 服务端错误: {e}（第 {infra_retried} 次重试）")
+                if not e.retryable or infra_retried >= 4:
+                    break
+        if result is None:
+            task.status = TaskStatus.FAIL
+            state.failed.append(task)
+            state.observations.append(
+                {"task_id": task.task_id, "report": None,
+                 "note": f"{task.action} 基础设施失败（服务重试耗尽）"})
+            state.log(f"❌ {task.action} {task.task_id} 服务不可用，放弃")
+            continue
+
+        # 3) 观察（三层 Critic 合并报告）→ 4) 判断推进
         report = critic.evaluate(task, result)
         result["_score"] = f"{report.score:.2f}"
         if verbose:

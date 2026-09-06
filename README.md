@@ -1,9 +1,22 @@
-# HxMV — 自主内容生产智能体（Autonomous Content Agent）
+# HxMV
 
-**规划 → 执行 → 观察 → 判断 → 修正**的自主闭环控制内核。
-视频/图片/配音只是第一个应用场景——真正可复用的是那个控制循环，不是某一家生成 API 的调用代码。
+<p align="center">
+<b>自主内容生产智能体 · Autonomous Content Agent</b><br/>
+规划 → 执行 → 观察 → 判断 → 修正
+</p>
 
-> Hx = 个人 AI 生态前缀（HxSync 同族），MV = Media & Video。
+<p align="center">
+<a href="https://github.com/yangwenhua212/HxMV"><img alt="GitHub" src="https://img.shields.io/github/stars/yangwenhua212/HxMV?style=social"></a>
+<img alt="Python" src="https://img.shields.io/badge/Python-3.10+-blue?logo=python">
+<img alt="License" src="https://img.shields.io/badge/License-MIT-green">
+<img alt="Deps" src="https://img.shields.io/badge/dependencies-zero-orange">
+</p>
+
+**Hx = 个人 AI 生态前缀（HxSync 同族），MV = Media & Video。**
+视频/图片/配音只是第一个应用场景——真正可复用的是一个控制循环，不是某家生成 API 的调用代码。
+
+> 你的系统应该像团队一样工作：**LLM 是策划，代码是执行，Critic 是质检，Refiner 是返工师傅，Brain 是老师傅的记忆**。
+
 
 ## 核心思想
 
@@ -31,6 +44,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/context.py` | 动态上下文压缩（超 token 阈值才压，不固定"每 N 步"） |
 | `core/loop.py` | Autonomous Control Loop + 执行报告 |
 | `core/brain.py` | **大脑**：持久记忆，每次 run 自动加载注入、跑完自动回写（详见下） |
+| `providers/` | **v0.2 Provider 层**：`VideoProvider` 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
 
 **大脑（持久记忆，v0.1.1）**——像 Hermes 记忆一样"直接用"，但容量不受 2000 字限制：
 - 持久化到 `~/.hxmv/brain.json`，进程退出不丢，跨目标/跨项目复用
@@ -52,6 +66,10 @@ python3 -m hxmv "一只小猫在花园里追蝴蝶，5 秒钟"
 # 清空大脑从零跑（看学习曲线）
 python3 -m hxmv --fresh "一只小猫在花园里追蝴蝶"
 
+# 接真实生成服务（v0.2 Provider 层，fake 仿真无需 key 可跑）
+HXMV_PROVIDER=fake python3 -m hxmv "雪地里的柯基"
+# HXMV_PROVIDER=kling HXMV_KLING_KEY=sk-xxx python3 -m hxmv "..."   # 真实服务
+
 # 接真 LLM（Planner 规划 + L3 语义评审自动启用；失败自动降级 Mock）
 export OPENAI_API_KEY=sk-xxx
 export OPENAI_BASE_URL=https://api.deepseek.com/v1   # 任意 OpenAI 兼容端点
@@ -64,7 +82,9 @@ python3 -m hxmv "30 秒产品宣传片，现代极简风"
 ## 路线
 
 - **V0.1** ✅ 自主闭环内核（Mock 世界）：LLM 提方案 → 执行 → 三层检测 → 修正 → 通过
-- **V0.2** 📋 接真实生成器：实现 Executor 适配层（可灵/Veo 等 text_to_video），L2 换真视觉模型抽关键帧比对
+- **V0.1.1** ✅ 大脑（Brain）：持久记忆、自动注入/回写、会遗忘——系统越用越懂
+- **V0.2** 🚧 Provider 层完成（接真实生成器的桥梁已通，fake 仿真端到端验证）：
+  `VideoProvider` 接口 + 可灵接入骨架 + `docs/PROVIDERS.md`；剩余：填真实 API 鉴权、L2 换真视觉模型抽关键帧比对
 - **V0.3** 📋 资产与一致管线：角色参考图资产库（Asset Manager）、checkpoint 人工审批点
 - **V0.4** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
