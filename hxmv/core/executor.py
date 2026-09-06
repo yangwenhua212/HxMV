@@ -51,8 +51,9 @@ class MockVideoExecutor(Executor):
     def _consistency_defects(self, rng: random.Random, task: Task) -> list[str]:
         """L2 一致性缺陷：与 reference_strength 强相关（Refiner 能修）。"""
         strength = float(task.constraints.get("reference_strength", 0.4))
+        scene_strength = float(task.constraints.get("scene_strength", strength))
         p_char = max(0.05, 0.42 - strength * 0.32)
-        p_scene = max(0.04, 0.30 - strength * 0.26)
+        p_scene = max(0.04, 0.30 - scene_strength * 0.26)
         out = []
         if "character" in task.constraints and rng.random() < p_char:
             out.append("character_inconsistency")

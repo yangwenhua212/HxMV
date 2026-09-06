@@ -3,4 +3,4 @@
 V0.1：先跑通 Autonomous Control Loop（不依赖任何视频 API），
 视频生成只是第一个应用场景，控制内核可复用于任意生成任务。
 """
-__version__ = "0.1.0"
+__version__ = "0.1.1"

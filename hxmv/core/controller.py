@@ -13,8 +13,9 @@ from .refiner import Refiner
 
 
 class Controller:
-    def __init__(self, refiner: Refiner | None = None):
+    def __init__(self, refiner: Refiner | None = None, brain=None):
         self.refiner = refiner or Refiner()
+        self.brain = brain  # 可选：PASS 时把验证有效的经验写进持久记忆
 
     def update(self, state: ExecutionState, task: Task,
                result: dict, report) -> str:
@@ -60,14 +61,19 @@ class Controller:
         state.log(f"❌ {task.action} {task.task_id} 终态 FAIL（尝试耗尽）")
         return "FAIL"
 
-    @staticmethod
-    def _remember_success(state: ExecutionState, task: Task, report) -> None:
+    def _remember_success(self, state: ExecutionState, task: Task, report) -> None:
         """PASS 时：把 fixes_applied 里被验证有效的 (failure→suggestion) 记入质量记忆。
 
         语义：这个失败用这个修正方向，成功了——后续同类失败 Refiner 优先复用。
         """
         if not task.fixes_applied:
             return
+        # 持久记忆回写（Brain）：同源经验累积 → 重要性升 → 下次更优先注入
+        if self.brain:
+            for fix in task.fixes_applied:
+                self.brain.remember_lesson(
+                    fix["failure"], fix["suggestion"], report.score,
+                    context=f"{task.action}: {str(task.input.get('prompt', ''))[:80]}")
         mem = state.memory.setdefault("quality", {})
         for fix in task.fixes_applied:
             f, s = fix["failure"], fix["suggestion"]

@@ -14,6 +14,7 @@ while not goal_reached:
 """
 from __future__ import annotations
 
+from .brain import Brain
 from .context import ContextManager
 from .controller import Controller
 from .critic import PipelineCritic
@@ -24,7 +25,7 @@ from .state import ExecutionState, TaskStatus
 
 def banner(state: ExecutionState) -> None:
     print("\n" + "═" * 52)
-    print(f"  HxMV 自主控制闭环  v0.1")
+    print(f"  HxMV 自主控制闭环  v0.1.1")
     print(f"  目标：{state.goal}")
     print("═" * 52)
 
@@ -58,17 +59,27 @@ def summary(state: ExecutionState) -> None:
 def run(goal: str,
         planner=None, executor=None, critic=None, controller=None,
         context: ContextManager | None = None,
+        brain: Brain | None = None,
         verbose: bool = True) -> ExecutionState:
-    """跑一个目标到完成，返回最终 ExecutionState（可继续检视/续跑）。"""
+    """跑一个目标到完成，返回最终 ExecutionState（可继续检视/续跑）。
+
+    brain：持久记忆（"大脑"）。不传则自动加载 ~/.hxmv/brain.json。
+    经验在闭环中自动积累：PASS 回写、下次 run 自动注入 Planner。
+    """
     state = ExecutionState(goal=goal)
+    brain = brain or Brain()
     if verbose:
         banner(state)
+        if brain.size:
+            print(f"  🧠 大脑：{brain.stats()}（已加载，自动注入规划）")
+        else:
+            print("  🧠 大脑：空（本次运行将开始积累经验）")
 
     executor = executor or MockVideoExecutor()
     critic = critic or PipelineCritic()
-    controller = controller or Controller()
+    controller = controller or Controller(brain=brain)
     context = context or ContextManager()
-    planner = planner or make_planner(state)  # 工厂：LLM 优先，失败落 Mock
+    planner = planner or make_planner(state, brain)  # 工厂：LLM 优先（带记忆），失败落 Mock
 
     while True:
         if state.budget.exhausted:
@@ -100,6 +111,8 @@ def run(goal: str,
     state.current = None
     if verbose:
         summary(state)
+        print(f"  🧠 大脑已更新：{brain.stats()}（经验持久化到 {brain.path}）")
+    brain.save()
     return state
 
 

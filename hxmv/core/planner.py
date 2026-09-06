@@ -31,15 +31,35 @@ def _first_scene_prompt(goal: str) -> str:
 
 
 class MockPlanner(Planner):
-    """固定流水线：角色 → 场景 → 2 个镜头 → 成片。V0.1 演示闭环用。"""
+    """固定流水线：角色 → 场景 → 2 个镜头 → 成片。V0.1 演示闭环用。
 
-    def __init__(self):
+    会"记得"：若 Brain 里有角色/场景一致性的成功经验，
+    初始 reference_strength 自动抬高——同样的活第二次干得更好。
+    """
+
+    def __init__(self, brain=None):
         self._queue: list[Task] = []
         self._built = False
+        self._brain = brain
+
+    def _learnt_strength(self, failure_key: str, base: float) -> float:
+        """从大脑读取同类失败经验：命中越多，起手参数越稳。"""
+        if not self._brain:
+            return base
+        hits = sum(1 for e in self._brain.recall(failure_key, top_k=10)
+                   if e.kind == "LESSON" and e.meta.get("failure") == failure_key)
+        return min(1.0, base + 0.05 * hits)  # 每条经验 +0.05
 
     def next_task(self, state: ExecutionState) -> Task | None:
         if not self._built:
             base = _first_scene_prompt(state.goal)
+            s_char = self._learnt_strength("character_inconsistency", 0.4)
+            s_scene = self._learnt_strength("scene_inconsistency", 0.4)
+            shot_constraints = {"character": "cat", "style": "cinematic", "scene": "s01",
+                                "continuity": True, "reference_strength": s_char,
+                                "scene_strength": s_scene}
+            if s_char > 0.4 or s_scene > 0.4:
+                state.log(f"🧠 记忆起手：reference_strength {s_char:.2f} / scene {s_scene:.2f}（上次学到的）")
             self._queue = [
                 Task(ACTION_STORYBOARD,
                      input={"goal": state.goal},
@@ -52,12 +72,10 @@ class MockPlanner(Planner):
                      constraints={"style": "cinematic", "scene_key": "s01"}),
                 Task(ACTION_GENERATE_SHOT,
                      input={"prompt": base, "duration": 5, "seed": 101},
-                     constraints={"character": "cat", "style": "cinematic", "scene": "s01",
-                                  "continuity": True, "reference_strength": 0.4}),
+                     constraints=dict(shot_constraints)),
                 Task(ACTION_GENERATE_SHOT,
                      input={"prompt": base + "，特写", "duration": 5, "seed": 202},
-                     constraints={"character": "cat", "style": "cinematic", "scene": "s01",
-                                  "continuity": True, "reference_strength": 0.4}),
+                     constraints=dict(shot_constraints)),
                 Task(ACTION_COMPOSE,
                      input={"shots": ["shot#1", "shot#2"], "output": "final.mp4"},
                      quality={"min_score": 0.85}),
@@ -67,7 +85,8 @@ class MockPlanner(Planner):
 
 
 class LLMPlanner(Planner):
-    """真 LLM 规划：要求模型只输出 JSON 任务数组（喂 schema 例子）。"""
+    """真 LLM 规划：要求模型只输出 JSON 任务数组（喂 schema 例子）。
+    系统提示自动注入 Brain 记忆——模型想问题时天然带着历史经验（直接用）。"""
 
     SYSTEM = (
         "你是 HxMV 的 Planner。用户给你一个内容生产目标，你把它拆成结构化任务数组。\n"
@@ -78,11 +97,16 @@ class LLMPlanner(Planner):
         "不要输出任何 JSON 以外的文字。动作全部大写。"
     )
 
+    def __init__(self, brain=None):
+        self._brain = brain
+
     def next_task(self, state: ExecutionState) -> Task | None:
         if state.phase == "PLAN" and not state.tasks:
             try:
+                memory_block = self._brain.inject(query=state.goal) if self._brain else ""
+                system = self.SYSTEM + ("\n" + memory_block if memory_block else "")
                 text = llm.chat([
-                    {"role": "system", "content": self.SYSTEM},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": state.goal},
                 ], temperature=0.2)
                 array = json.loads(re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.M))
@@ -98,12 +122,12 @@ class LLMPlanner(Planner):
         return None
 
 
-def make_planner(state: ExecutionState) -> Planner:
+def make_planner(state: ExecutionState, brain=None) -> Planner:
     """工厂：能接 LLM 就接，失败/未配置落 MockPlanner（可跑性是底线）。"""
     if llm.llm_available():
-        p = LLMPlanner()
+        p = LLMPlanner(brain)
         probe = p.next_task(state)
         if probe is not None:
             return p
         state.log("⚠ LLM 规划失败，降级 MockPlanner")
-    return MockPlanner()
+    return MockPlanner(brain)

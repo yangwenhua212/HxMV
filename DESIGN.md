@@ -60,6 +60,15 @@
    不固定"每 N 镜头压缩一次"，而是 observations 估算 token 超阈值才压缩
    （折叠最旧保留最新），由 ContextManager 统一管。
 
+6. **大脑 = 持久记忆层（brain.py）**
+   对齐 Hermes 记忆哲学但打破小容量限制：
+   - 写入自动化：闭环 PASS 自动回写经验，无需手动 remember
+   - 读取自动化：每次 run 自动注入"重要+相关"记忆进 Planner 上下文，无需手动 recall
+   - 容量不限死：存多少都行；注入时才按（相关性×重要性）top-k 受预算约束
+   - 会遗忘：importance 时间衰减、软上限淘汰低价值条目
+   - 三层记忆的 HxMV 版：Brain(LESSON/FACT 常驻+检索) 是 Hermes 便签+大脑的合一，
+     未来可再接 EraHerm 做跨项目大档案（L3）
+
 ## 文件结构
 
 ```
