@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 环境与密钥
+.env
+*.key
+*.jks
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 产物
+output/
+*.mp4
+*.tmp
