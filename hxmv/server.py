@@ -33,6 +33,10 @@ from .core.loop import run
 RUNS_DIR = os.path.expanduser("~/.hxmv/runs")
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html")
 
+# 公网防护：设置 HXMV_WEB_TOKEN 后，所有 /api/* 请求需带 token
+# （header X-Hxmv-Token 或 query ?token=，EventSource 只能用 query）
+HXMV_WEB_TOKEN = os.environ.get("HXMV_WEB_TOKEN", "")
+
 PROVIDERS = {"mock": "", "fake": "fake", "kling": "kling"}
 
 
@@ -189,6 +193,15 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             return {}
 
+    def _authed(self) -> bool:
+        """公网 token 校验（未设置 HXMV_WEB_TOKEN 时全放行，保持本地零配置）。"""
+        if not HXMV_WEB_TOKEN:
+            return True
+        from urllib.parse import parse_qs
+        q = parse_qs(urlparse(self.path).query)
+        tok = self.headers.get("X-Hxmv-Token") or (q.get("token") or [""])[0]
+        return tok == HXMV_WEB_TOKEN
+
     def log_message(self, *args) -> None:  # 静音默认访问日志
         pass
 
@@ -208,6 +221,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             except OSError:
                 self._send_err(500, f"面板文件缺失: {WEB_HTML}")
+            return
+
+        if not self._authed():
+            self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
             return
 
         if p == "/api/brain":
@@ -276,6 +293,9 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path != "/api/run":
             self._send_err(404, f"未知路径: {u.path}")
+            return
+        if not self._authed():
+            self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
             return
         body = self._read_body()
         goal = str(body.get("goal", "")).strip()
