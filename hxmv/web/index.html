@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HxMV 控制台 — 自主内容生产闭环</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2330; --border: #2a3344;
+    --text: #e6edf3; --dim: #8b98a9; --accent: #4da3ff; --green: #3fb96f;
+    --amber: #d9a13b; --red: #e5534b; --purple: #a371f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { display: flex; align-items: center; gap: 14px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 17px; letter-spacing: .5px; }
+  header h1 span { color: var(--accent); }
+  #brainBadge { margin-left: auto; font-size: 12px; color: var(--dim); background: var(--panel2); padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border); }
+  main { display: grid; grid-template-columns: 1fr 340px; gap: 16px; padding: 16px 20px; max-width: 1400px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h3 { font-size: 13px; color: var(--dim); font-weight: 600; margin-bottom: 10px; letter-spacing: 1px; }
+
+  /* 提交区 */
+  #submitCard textarea { width: 100%; height: 60px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 14px; resize: vertical; font-family: inherit; }
+  #submitCard textarea:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 10px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  select, button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  #runBtn { background: var(--accent); border: none; color: #0d1117; font-weight: 700; padding: 8px 26px; }
+  #runBtn:disabled { opacity: .5; cursor: not-allowed; }
+  #runHint { font-size: 12px; color: var(--dim); }
+  .runid { font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent); }
+
+  /* 时间线 */
+  #timeline { min-height: 200px; }
+  .ev { border-left: 3px solid var(--border); padding: 2px 0 14px 16px; margin-left: 6px; position: relative; }
+  .ev::before { content: ""; position: absolute; left: -6.5px; top: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
+  .ev.run.start::before { background: var(--accent); }
+  .ev.run.done::before { background: var(--green); }
+  .ev.decision.PASS::before, .ev.decision.pass::before { background: var(--green); }
+  .ev.decision.RETRY::before, .ev.decision.retry::before { background: var(--amber); }
+  .ev.decision.FAIL::before, .ev.decision.fail::before { background: var(--red); }
+  .ev .meta { font-size: 12px; color: var(--dim); margin-bottom: 2px; }
+  .ev .title { font-weight: 600; }
+  .ev .title .act { color: var(--accent); font-family: ui-monospace, monospace; font-size: 12px; background: var(--panel2); padding: 1px 8px; border-radius: 5px; margin-right: 6px; }
+  .ev .sub { font-size: 13px; margin-top: 3px; color: var(--text); }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 9px; border-radius: 20px; margin: 3px 6px 0 0; }
+  .pill.green { background: rgba(63,185,111,.15); color: var(--green); border: 1px solid rgba(63,185,111,.4); }
+  .pill.amber { background: rgba(217,161,59,.12); color: var(--amber); border: 1px solid rgba(217,161,59,.4); }
+  .pill.red { background: rgba(229,83,75,.12); color: var(--red); border: 1px solid rgba(229,83,75,.4); }
+  .pill.gray { background: rgba(139,152,169,.1); color: var(--dim); border: 1px solid var(--border); }
+  .scorebar { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+  .layer { font-size: 11px; color: var(--dim); }
+  .bar { width: 90px; height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 3px; }
+  .scoresum { font-weight: 700; font-size: 15px; }
+
+  /* 右侧栏 */
+  aside { display: flex; flex-direction: column; gap: 16px; }
+  #brainList, #runsList { max-height: 300px; overflow-y: auto; }
+  .bentry { font-size: 12px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--panel2); }
+  .bentry .k { font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 4px; margin-right: 6px; }
+  .k.LESSON { background: rgba(163,113,247,.2); color: var(--purple); }
+  .k.FACT { background: rgba(77,163,255,.15); color: var(--accent); }
+  .k.PREF { background: rgba(63,185,111,.15); color: var(--green); }
+  .bentry .imp { float: right; color: var(--amber); font-size: 11px; }
+  .bentry .c { color: var(--text); display: block; margin-top: 3px; line-height: 1.5; }
+  .runit { font-size: 12px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--panel2); cursor: pointer; }
+  .runit:hover { border-color: var(--accent); }
+  .runit .g { color: var(--text); font-weight: 600; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .runit .s { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot.done { background: var(--green); } .dot.running { background: var(--amber); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+  .empty { color: var(--dim); font-size: 13px; text-align: center; padding: 30px 0; }
+  #sumBox { display: none; }
+  footer { text-align: center; color: var(--dim); font-size: 11px; padding: 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>HxMV <span>自主内容生产闭环</span> 控制台</h1>
+  <div id="brainBadge">🧠 大脑加载中…</div>
+</header>
+
+<main>
+  <section>
+    <div class="card" id="submitCard">
+      <h3>🎬 提交生产目标</h3>
+      <textarea id="goalInput" placeholder="例如：一只柯基在雪地里打滚，拍一个 8 秒短片，暖色调…"></textarea>
+      <div class="row">
+        <select id="providerSel">
+          <option value="mock">mock 世界（确定性演示）</option>
+          <option value="fake">fake 仿真（两段式提交/503 重试）</option>
+          <option value="kling">kling（需配置 API）</option>
+        </select>
+        <button id="runBtn">▶ 开始生产</button>
+        <span id="runHint"></span>
+      </div>
+    </div>
+
+    <div class="card" id="liveCard">
+      <h3>⚡ 实时闭环</h3>
+      <div id="timeline"><div class="empty">提交目标后，这里会实时流出 规划 → 执行 → 三层评审 → 修正 的完整过程</div></div>
+    </div>
+
+    <div class="card" id="sumBox">
+      <h3>📊 执行报告</h3>
+      <div id="sumBody"></div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <h3>🧠 大脑（自动沉淀）</h3>
+      <div id="brainList"><div class="empty">暂无经验</div></div>
+    </div>
+    <div class="card">
+      <h3>🕘 历史 run（点击回放）</h3>
+      <div id="runsList"><div class="empty">暂无</div></div>
+    </div>
+  </aside>
+</main>
+
+<footer>HxMV Control Console · 内核 v0.1+ · 事件旁路观察，不改闭环职责</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let currentRun = null, es = null;
+
+// ---------- 大脑 ----------
+async function refreshBrain() {
+  try {
+    const d = await (await fetch("/api/brain")).json();
+    $("brainBadge").textContent = `🧠 大脑：${d.stats}`;
+    const box = $("brainList");
+    if (!d.entries.length) { box.innerHTML = '<div class="empty">暂无经验</div>'; return; }
+    box.innerHTML = d.entries.map(e =>
+      `<div class="bentry"><span class="k ${e.kind}">${e.kind}</span><span class="imp">★${e.importance.toFixed(2)}</span>` +
+      (e.hits_3 ? '<span class="pill green">升华</span>' : '') +
+      `<span class="c">${esc(e.content)}</span></div>`).join("");
+  } catch (e) { /* server 未起 */ }
+}
+
+// ---------- 历史 ----------
+async function refreshRuns() {
+  try {
+    const d = await (await fetch("/api/runs")).json();
+    const box = $("runsList");
+    if (!d.runs.length) { box.innerHTML = '<div class="empty">暂无</div>'; return; }
+    box.innerHTML = d.runs.map(r => {
+      const t = r.tail || {};
+      const status = r.status === "done" ? "done" : "running";
+      const stat = t.type === "run.done"
+        ? `${(t.completed||[]).length} 完成 / ${(t.failed||[]).length} 失败 · ${t.attempts} 次尝试 · ${t.cost_units} 元`
+        : "进行中…";
+      return `<div class="runit" onclick="replay('${r.run_id}')">
+        <span class="g"><span class="dot ${status}"></span>${esc(r.goal.slice(0, 40))}</span>
+        <span class="s">${r.run_id.slice(9)} · ${stat}</span></div>`;
+    }).join("");
+  } catch (e) {}
+}
+
+// ---------- 渲染事件 ----------
+function layerColor(score) { return score >= 0.8 ? "var(--green)" : score >= 0.6 ? "var(--amber)" : "var(--red)"; }
+
+function renderEvent(ev, container) {
+  const div = document.createElement("div");
+  div.className = "ev " + (ev.type + " " + (ev.decision || "").toLowerCase()).toLowerCase();
+  const t = new Date(ev.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+  const meta = `<span class="meta">${t}</span>`;
+
+  if (ev.type === "run.start") {
+    div.innerHTML = `<div class="meta">${t}</div><div class="title">🚀 闭环启动<span class="pill gray">目标</span></div>
+      <div class="sub">${esc(ev.goal)}</div>
+      <div class="sub" style="color:var(--dim);font-size:12px">🧠 大脑 ${ev.brain.size} 条 · 预算 ${ev.budget_max_attempts} 次尝试</div>`;
+  } else if (ev.type === "task.start") {
+    div.innerHTML = `<div class="meta">${t}</div><div class="title"><span class="act">${ev.action}</span> ${ev.kind === "retry" ? "🔧 修正重试" : "新任务"} ${ev.task_id}</div>
+      ${ev.prompt ? `<div class="sub">${esc(ev.prompt)}</div>` : ""}`;
+  } else if (ev.type === "infra.retry") {
+    div.innerHTML = `<div class="meta">${t}</div><div class="title">⚠ 服务端重试 ${ev.attempt}/4</div><div class="sub">${esc(ev.error)}</div>`;
+  } else if (ev.type === "critic") {
+    const layers = (ev.layers || []).map(l =>
+      `<span class="layer">${l.layer.split("_")[0]}</span><span class="bar"><i style="width:${Math.round(l.score*100)}%;background:${layerColor(l.score)}"></i></span>`).join("");
+    const pills = (ev.failures || []).map((f, i) =>
+      `<span class="pill ${f ? "red" : "gray"}">${esc(f)} → ${esc((ev.suggestions||[])[i] || "")}</span>`).join("");
+    div.innerHTML = `<div class="meta">${t}</div><div class="title">👁 三层评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div>
+      <div class="scorebar">${layers}</div>${pills ? `<div>${pills}</div>` : ""}`;
+  } else if (ev.type === "decision") {
+    const map = { PASS: ["✅ PASS", "green"], RETRY: ["🔧 RETRY", "amber"], FAIL: ["❌ FAIL", "red"] };
+    const [label, cls] = map[ev.decision] || [ev.decision, "gray"];
+    let extra = "";
+    if (ev.decision === "PASS" && ev.fixes_applied?.length) {
+      extra = `<div class="sub">🧠 回写经验：${ev.fixes_applied.map(f => `${f.failure} → ${f.suggestion}`).join("；")}</div>`;
+    } else if (ev.note) {
+      extra = `<div class="sub">${esc(ev.note)}</div>`;
+    }
+    div.innerHTML = `<div class="meta">${t}</div><div class="title">${label}<span class="pill ${cls}">第 ${ev.attempts_used}/${ev.max_attempts} 次尝试</span></div>${extra}`;
+  } else if (ev.type === "run.done") {
+    const rows = (ev.completed || []).map(c => `<div>✅ ${c.action} ${c.task_id} <span class="pill green">${c.score}</span></div>`).join("");
+    const fails = (ev.failed || []).map(f => `<div>❌ ${f.action} ${f.task_id}</div>`).join("");
+    div.innerHTML = `<div class="meta">${t}</div><div class="title">🏁 闭环完成${ev.phase === "ERROR" ? "（异常）" : ""}</div>
+      ${rows || '<div class="sub" style="color:var(--dim)">无完成任务</div>'}
+      ${fails}
+      <div class="sub">总尝试 ${ev.attempts} · 成本 ${ev.cost_units} 元 · 迭代 ${ev.iterations} 轮${ev.budget_exhausted ? " · ⚠ 预算耗尽" : ""}</div>
+      <div class="sub" style="color:var(--dim);font-size:12px">🧠 大脑更新后 ${ev.brain.size} 条${ev.error ? " · 错误: " + esc(ev.error) : ""}</div>`;
+    $("liveCard").querySelector("h3").textContent = "⚡ 实时闭环";
+  }
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+// ---------- 提交 ----------
+async function submitRun() {
+  const goal = $("goalInput").value.trim() || "一只柯基在雪地里打滚，8 秒短片，暖色调";
+  const provider = $("providerSel").value;
+  $("runBtn").disabled = true; $("runBtn").textContent = "⏳ 提交中…";
+  try {
+    const res = await (await fetch("/api/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ goal, provider })
+    })).json();
+    if (res.error) throw new Error(res.error);
+    startStream(res.run_id);
+  } catch (e) {
+    $("runHint").textContent = "❌ " + e.message;
+  }
+  $("runBtn").disabled = false; $("runBtn").textContent = "▶ 开始生产";
+}
+
+// ---------- SSE 实时 ----------
+function startStream(runId) {
+  if (es) es.close();
+  currentRun = runId;
+  const tl = $("timeline");
+  tl.innerHTML = ""; $("sumBox").style.display = "none";
+  $("liveCard").querySelector("h3").textContent = `⚡ 实时闭环 · run ${runId.slice(9)}`;
+  es = new EventSource(`/api/stream?run_id=${runId}`);
+  es.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    renderEvent(ev, tl);
+    if (ev.type === "run.done") { es.close(); refreshBrain(); refreshRuns(); showSummary(ev); }
+  };
+  es.onerror = () => {};
+}
+
+function showSummary(ev) {
+  $("sumBox").style.display = "block";
+  const rows = (ev.completed || []).map(c =>
+    `<div style="padding:6px 0;border-bottom:1px solid var(--border)">✅ <b>${c.action}</b> ${c.task_id} · score ${c.score}${c.refine_history?.length ? `<br><span style="color:var(--dim);font-size:12px">修正: ${esc(c.refine_history.join("；"))}</span>` : ""}</div>`).join("");
+  $("sumBody").innerHTML = rows || '<div class="empty">无完成任务</div>';
+}
+
+// ---------- 回放 ----------
+async function replay(runId) {
+  const tl = $("timeline"); tl.innerHTML = ""; $("sumBox").style.display = "none";
+  $("liveCard").querySelector("h3").textContent = `🕘 回放 run ${runId.slice(9)}（点击上方历史可切换）`;
+  try {
+    const d = await (await fetch(`/api/run/${runId}`)).json();
+    if (currentRun && es) { es.close(); es = null; }
+    currentRun = null;
+    for (const ev of d.events) {
+      const div = document.createElement("div");
+      div.className = "ev " + (ev.type + " " + (ev.decision || "")).toLowerCase();
+      const t = new Date(ev.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+      // 简化重放：只渲染摘要行
+      let html = `<div class="meta">${t}</div>`;
+      if (ev.type === "run.start") html += `<div class="title">🚀 ${esc(ev.goal)}</div>`;
+      else if (ev.type === "task.start") html += `<div class="title"><span class="act">${ev.action}</span> ${ev.task_id}${ev.kind==="retry"?"（修正重试）":""}</div>`;
+      else if (ev.type === "critic") html += `<div class="title">👁 评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div><div>${(ev.failures||[]).map(f=>`<span class="pill red">${esc(f)}</span>`).join("")}</div>`;
+      else if (ev.type === "decision") html += `<div class="title">${ev.decision === "PASS" ? "✅" : ev.decision === "RETRY" ? "🔧" : "❌"} ${ev.decision}</div>${ev.note?`<div class="sub">${esc(ev.note)}</div>`:""}`;
+      else if (ev.type === "run.done") html += `<div class="title">🏁 ${(ev.completed||[]).length} 完成 / ${(ev.failed||[]).length} 失败 · ${ev.attempts} 次尝试</div>`;
+      else continue;
+      div.innerHTML = html; tl.appendChild(div);
+    }
+  } catch (e) { tl.innerHTML = '<div class="empty">回放失败</div>'; }
+}
+
+$("runBtn").onclick = submitRun;
+$("goalInput").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitRun(); });
+refreshBrain(); refreshRuns();
+setInterval(refreshBrain, 8000);
+</script>
+</body>
+</html>

@@ -76,18 +76,40 @@ hxmv/
 ├── hxmv/
 │   ├── __main__.py      # CLI
 │   ├── quality.py       # QualityReport
+│   ├── server.py        # Web 控制台 daemon（stdlib HTTP + SSE）
+│   ├── web/
+│   │   └── index.html   # 单文件面板（零框架，中文深色）
 │   └── core/
 │       ├── state.py     # Task / ExecutionState / Budget
 │       ├── planner.py   # Planner（LLM + Mock 降级）
 │       ├── executor.py  # MockVideoExecutor（缺陷注入）
-│       ├── critic.py    # L1/L2/L3 + PipelineCritic
+│       ├── critic.py    # L1/L2/L3 + PipelineCritic（含 evaluate_layers 分层报告）
 │       ├── refiner.py   # 调参重投 + 记忆查询
 │       ├── controller.py# PASS/RETRY/FAIL + 记忆回写
 │       ├── context.py   # 动态压缩
-│       └── loop.py      # Autonomous Control Loop
+│       └── loop.py      # Autonomous Control Loop（emit 事件旁路）
 ├── README.md
 └── DESIGN.md
 ```
+
+## Web 控制台设计（客户端）
+
+- **事件旁路，观察不改**：`loop.run(goal, emit=cb)` 在每个关键节点（run.start / task.start /
+  infra.retry / critic / decision / run.done）emit JSON 事件 dict。CLI 的 print 原样保留
+  （终端是渲染器之一），事件供 daemon/Web 消费——事件 = 观察层，不干预闭环任何判断。
+  订阅者抛异常被吞（`_emit` try/except），永远不打断生产。
+- **critic 事件带分层**：`PipelineCritic.evaluate_layers()` 暴露 L1/L2/L3 每层报告，
+  UI 才能展示「哪层挂了」而不是只有合并分。`evaluate()` 复用它 merge，老接口不变。
+- **串行 worker**：daemon 单线程顺序跑 run——Brain 是单文件（`~/.hxmv/brain.json`），
+  并发写会打架。多 run 提交即排队。
+- **事件落盘**：每个 run `~/.hxmv/runs/<id>/events.jsonl`，追加即 flush——daemon 重启后
+  历史仍在，前端可整 run 回放（`GET /api/run/<id>`）。SSE 先回放已落盘事件再实时推送，
+  订阅者不会漏事件。
+- **provider 选择**：daemon 提交时带 provider 参数，worker 执行前设 `HXMV_PROVIDER`
+  环境变量（串行安全）；mock/fake/kling 三选一。
+- **产物形态**：run.done 事件带 completed/failed/预算/大脑统计，`summary()` 同源数据。
+- 坑（实测）：面板 JS 里 `forEach` 回调内 `continue` 是非法的（SyntaxError 会让整个
+  script 不执行，页面看起来「全没反应」）——要跳过元素用 `for...of` 循环或 `return`。
 
 ## 边界（勿越界）
 

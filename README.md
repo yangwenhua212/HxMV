@@ -42,9 +42,10 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/refiner.py` | 按 failures→suggestions 调参重投；**优先查质量记忆里的历史成功修正** |
 | `core/controller.py` | 判定 PASS/RETRY/FAIL；PASS 时把验证有效的修正回写质量记忆 |
 | `core/context.py` | 动态上下文压缩（超 token 阈值才压，不固定"每 N 步"） |
-| `core/loop.py` | Autonomous Control Loop + 执行报告 |
+| `core/loop.py` | Autonomous Control Loop + 执行报告 + **事件化**（`emit=` 旁路：CLI print 与客户端事件并存，观察层不干预闭环） |
 | `core/brain.py` | **大脑**：持久记忆，每次 run 自动加载注入、跑完自动回写（详见下） |
 | `providers/` | **v0.2 Provider 层**：`VideoProvider` 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
+| `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 大脑只读 + 单文件面板 |
 
 **大脑（持久记忆，v0.1.1）**——像 Hermes 记忆一样"直接用"，但容量不受 2000 字限制：
 - 持久化到 `~/.hxmv/brain.json`，进程退出不丢，跨目标/跨项目复用
@@ -79,13 +80,28 @@ python3 -m hxmv "30 秒产品宣传片，现代极简风"
 
 标准库 only，Python 3.10+。
 
+## Web 控制台（浏览器可视化闭环）
+
+纯 stdlib daemon，零第三方依赖，浏览器里实时看闭环全过程：
+
+```bash
+python3 -m hxmv.server            # 默认 http://127.0.0.1:8668
+python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
+```
+
+- **提交目标** → 选 provider（mock / fake 仿真 / kling）→ 实时流出 任务 → 三层评审 → 修正重试 → 完成
+- 每步展示 L1/L2/L3 分层分数、failures→suggestions 修正对、`🧠 回写经验` 提示
+- 侧栏实时显示大脑沉淀（LESSON 升华），底部历史 run 点击即回放
+- 事件存档：`~/.hxmv/runs/<id>/events.jsonl`（可审计、可回放）
+- 原理：`loop.run(goal, emit=cb)` 事件旁路——内核 print 不变（CLI 演示保真），daemon 订阅事件流走 SSE 推给面板；观察层永远不干预闭环判断
+
 ## 路线
 
 - **V0.1** ✅ 自主闭环内核（Mock 世界）：LLM 提方案 → 执行 → 三层检测 → 修正 → 通过
 - **V0.1.1** ✅ 大脑（Brain）：持久记忆、自动注入/回写、会遗忘——系统越用越懂
 - **V0.2** 🚧 Provider 层完成（接真实生成器的桥梁已通，fake 仿真端到端验证）：
   `VideoProvider` 接口 + 可灵接入骨架 + `docs/PROVIDERS.md`；剩余：填真实 API 鉴权、L2 换真视觉模型抽关键帧比对
-- **V0.3** 📋 资产与一致管线：角色参考图资产库（Asset Manager）、checkpoint 人工审批点
+- **V0.3** 🚧 Web 控制台已落地（事件化内核 + stdlib daemon + 单文件面板，见上）；剩余：资产与一致管线（Asset Manager）、checkpoint 人工审批点
 - **V0.4** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
 ## 设计文档

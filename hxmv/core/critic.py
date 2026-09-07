@@ -116,8 +116,12 @@ class PipelineCritic:
     def __init__(self):
         self.layers: list[Critic] = [L1PhysicsCritic(), L2VisualCritic(), L3SemanticCritic()]
 
+    def evaluate_layers(self, task: Task, result: dict) -> list[QualityReport]:
+        """逐层评估，返回每层独立报告（客户端/面板展示分层分数用）。"""
+        return [layer.evaluate(task, result) for layer in self.layers]
+
     def evaluate(self, task: Task, result: dict) -> QualityReport:
         merged = QualityReport(layer="PIPELINE", score=1.0)
-        for layer in self.layers:
-            merged = merged.merge(layer.evaluate(task, result))
+        for r in self.evaluate_layers(task, result):
+            merged = merged.merge(r)
         return merged
