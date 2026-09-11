@@ -22,7 +22,7 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 
 | 接口 | 方法 | 说明 |
 |---|---|---|
-| `/api/health` | GET | **发现实例 + 能力自检**：版本、ffmpeg、编码器、各后端是否配好 Key、项目列表、是否需要 token |
+| `/api/health`（公开免令牌） | GET | **发现实例 + 能力自检**：版本、ffmpeg、编码器、各后端是否配好 Key、项目列表、是否需要 token |
 | `/api/run` | POST `{goal, provider, project}` | 提交生产任务 → `{run_id}` |
 | `/api/stream?run_id=&token=` | GET (SSE) | 实时事件流（先回放已落盘事件，再推送新事件） |
 | `/api/run/<id>` | GET | 全量事件 + `status: running\|done`（**状态看事件里有没有 run.done，不靠最后一条**） |

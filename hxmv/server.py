@@ -294,21 +294,20 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
             return
 
-        if not self._authed():
-            self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
-            return
-
         if p in ("/api/health", "/healthz"):
-            # 客户端"发现实例"用：本地跑还是远端跑，一次探测就知道能力与配置齐不齐
+            # 客户端"发现实例"用：**故意不要令牌**——否则客户端分不清"连不上"和"缺令牌"，
+            # 只会一律报"连不上"。项目名这类信息只有带令牌才给。
+            authed = self._authed()
             from .media import probe
             from .core import config
             from . import __version__ as _v
             from .core.project import Project
             projects = []
-            try:
-                projects = Project.list_all()
-            except Exception:
-                pass
+            if authed:
+                try:
+                    projects = Project.list_all()
+                except Exception:
+                    pass
             self._send_json({
                 "ok": True, "name": "hxmv", "version": _v, "server": self.server_version,
                 "ffmpeg": probe.has_ffmpeg(),
@@ -316,13 +315,19 @@ class Handler(BaseHTTPRequestHandler):
                 "providers": {name: {"ready": True if name == "mock" or name == "local"
                                      else config.configured(name)}
                               for name in PROVIDERS},
-                "projects": [{"id": x.get("id"), "episodes": x.get("episodes")} for x in projects],
+                "projects": [{"id": x.get("id"), "episodes": x.get("episodes")} for x in projects]
+                            if authed else [],
                 "runs": len(_scan_runs()),
                 "needs_token": bool(HXMV_WEB_TOKEN),
+                "authed": authed,
                 "notify": bool(os.environ.get("HXMV_NOTIFY_URL")),
                 "uptime_s": round(time.time() - STARTED_AT, 1),
                 "run_url": "/api/run", "stream_url": "/api/stream",
             })
+            return
+
+        if not self._authed():
+            self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
             return
 
         if p == "/api/brain":
