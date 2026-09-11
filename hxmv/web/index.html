@@ -91,6 +91,7 @@
       <textarea id="goalInput" placeholder="想做什么内容？例如：一只柯基在雪地里打滚，8 秒短片"></textarea>
       <div class="row">
         <select id="providerSel">
+          <option value="local">本地真渲染</option>
           <option value="mock">模拟世界</option>
           <option value="fake">线上仿真</option>
           <option value="kling">可灵 API</option>
@@ -143,12 +144,13 @@ const ACTIONS = { STORYBOARD: "分镜", GENERATE_CHARACTER: "角色", GENERATE_S
 const FAILURES = {
   black_frame: "黑帧", low_clarity: "清晰度不足", motion_blur: "运动模糊", fps_too_low: "帧率过低",
   low_volume: "音量过低", character_inconsistency: "角色不一致", scene_inconsistency: "场景不一致",
-  semantic_mismatch: "与剧本不符"
+  semantic_mismatch: "与剧本不符", frozen_frame: "画面静止", too_short: "时长不足", too_long: "超时长"
 };
 const SUGGESTIONS = {
   increase_reference_strength: "加强参考", reduce_motion_scale: "减小运动幅度",
-  increase_resolution: "提高分辨率", increase_fps: "提到 30fps", boost_audio_gain: "音量增益",
-  rewrite_prompt_closer: "贴合剧本"
+  increase_motion_scale: "提高运动幅度", increase_resolution: "升到 720p", increase_fps: "提到 30fps",
+  boost_audio_gain: "音量增益", trim_black_frames: "去掉黑场", extend_duration: "补时长",
+  trim_duration: "裁时长", rewrite_prompt_closer: "贴合剧本"
 };
 const zh = (d, k, fb) => d[k] || fb || k;
 const fmt = t => new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false });
@@ -218,8 +220,9 @@ function renderEvent(ev, container) {
       `<span class="layer">${l.layer.split("_")[0]}</span><span class="bar"><i style="width:${Math.round(l.score * 100)}%;background:${layerColor(l.score)}"></i></span>`).join("");
     const pills = (ev.failures || []).map((f, i) =>
       `<span class="pill red">${zh(FAILURES, f)} · ${zh(SUGGESTIONS, (ev.suggestions || [])[i])}</span>`).join("");
+    const measured = ev.detail ? `<div class="sub" style="color:var(--dim)">🔍 ${esc(ev.detail)}</div>` : "";
     div.innerHTML = t + `<div class="title">质量评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div>
-      <div class="scorebar">${layers}</div>${pills ? `<div>${pills}</div>` : ""}`;
+      <div class="scorebar">${layers}</div>${pills ? `<div>${pills}</div>` : ""}${measured}`;
   } else if (ev.type === "decision") {
     const map = { PASS: ["通过", "green"], RETRY: ["修正后重试", "amber"], FAIL: ["失败", "red"] };
     const [label, cls] = map[ev.decision] || [ev.decision, "gray"];
@@ -279,16 +282,24 @@ function startStream(runId) {
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
     renderEvent(ev, tl);
-    if (ev.type === "run.done") showSummary(ev);
+    if (ev.type === "run.done") showSummary(ev, runId);
   };
   es.onerror = () => {};
 }
 
-function showSummary(ev) {
+function showSummary(ev, runId) {
   $("sumBox").style.display = "block";
   const rows = (ev.completed || []).map(c =>
     `<div class="line">✅ <b>${ACTIONS[c.action] || c.action}</b> · 质量 ${c.score}${c.refine_history.length ? ` · 修正 ${c.refine_history.length} 次` : ""}</div>`).join("");
-  $("sumBody").innerHTML = rows || '<div class="empty">本次没有完成任务</div>';
+  // 真实产物（local provider）：只给落盘的绝对路径做下载/预览链接
+  const files = (ev.outputs || []).filter(p => String(p).startsWith("/"));
+  const arts = files.map(p => {
+    const name = String(p).split("/").pop();
+    const url = `/api/artifact?run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(name)}&token=${encodeURIComponent(TOKEN)}`;
+    const kind = name.startsWith("final") ? "成片" : name.endsWith(".png") ? "参考图" : "镜头";
+    return `<div class="line">🎬 ${kind} <a href="${url}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(name)}</a></div>`;
+  }).join("");
+  $("sumBody").innerHTML = (rows || '<div class="empty">本次没有完成任务</div>') + arts;
 }
 
 // ---------- 回放 ----------

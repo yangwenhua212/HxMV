@@ -74,16 +74,23 @@
 ```
 hxmv/
 ├── hxmv/
-│   ├── __main__.py      # CLI
+│   ├── __main__.py      # CLI（--provider/--out/--fresh/--brain）
 │   ├── quality.py       # QualityReport
-│   ├── server.py        # Web 控制台 daemon（stdlib HTTP + SSE）
+│   ├── server.py        # Web 控制台 daemon（stdlib HTTP + SSE + 产物取回）
 │   ├── web/
 │   │   └── index.html   # 单文件面板（零框架，中文深色）
+│   ├── media/
+│   │   └── probe.py     # 真眼睛：ffprobe/ffmpeg 量指标 + 判缺陷 + 外观一致度
+│   ├── providers/
+│   │   ├── base.py      # VideoProvider 接口 + ProviderError
+│   │   ├── local_render.py  # 本地 FFmpeg 真渲染（仿真生成器，参数真影响质量）
+│   │   ├── fake_api.py  # 仿真线上服务（提交/轮询/503）
+│   │   └── kling_example.py # 真实生成服务接入骨架
 │   └── core/
 │       ├── state.py     # Task / ExecutionState / Budget
-│       ├── planner.py   # Planner（LLM + Mock 降级）
-│       ├── executor.py  # MockVideoExecutor（缺陷注入）
-│       ├── critic.py    # L1/L2/L3 + PipelineCritic（含 evaluate_layers 分层报告）
+│       ├── planner.py   # Planner（LLM + Mock 降级，都带记忆起手）
+│       ├── executor.py  # MockVideoExecutor（参数相关的缺陷注入）+ ProviderExecutor 投影
+│       ├── critic.py    # L1/L2/L3 + PipelineCritic
 │       ├── refiner.py   # 调参重投 + 记忆查询
 │       ├── controller.py# PASS/RETRY/FAIL + 记忆回写
 │       ├── context.py   # 动态压缩
@@ -91,6 +98,79 @@ hxmv/
 ├── README.md
 └── DESIGN.md
 ```
+
+## 真产物 + 真眼睛（v0.4）
+
+### 为什么要这层
+
+mock 世界的缺陷是 executor 按概率"贴标签"的，Critic 读标签——那不是观察，是复述；
+真实生成服务不会自带质量标签，物理质量只能从像素和音轨里**量**出来。
+所以 v0.4 把 L1/L2 分成两条路：
+
+- `result["media"]/["output"]` 是**磁盘上真实存在的文件** → 调 `media/probe.py` 实测（真观察）
+- 否则（mock/fake 世界）→ 读 executor 注入的缺陷标签（服务端已知问题的加速通道）
+
+两条路产出同一个 `QualityReport`，Controller/Refiner 完全不用知道区别——**边界不变**。
+
+### 判据阈值表（`probe.THRESHOLDS`，标定实测）
+
+| 阈值 | 值 | 依据 |
+|---|---|---|
+| `min_height` | 720 | 低于 720p 判 `low_clarity`（分辨率是可稳定量出的清晰度维度） |
+| `min_fps` | 24 | 低于 24 判 `fps_too_low` |
+| `min_mean_volume_db` | -40 | `volumedetect` 量出的平均音量低于此判 `low_volume` |
+| `black_seconds` | 0.10 | `blackdetect` 累计黑屏超此判 `black_frame`（真片头全黑段实测 0.4s） |
+| `freeze_seconds` | 0.80 | `freezedetect(n=0.002)` 累计静止超此判 `frozen_frame` |
+| `min_consistency` | 0.90 | 外观一致度低于此判 `character/scene_inconsistency` |
+| `duration_ratio_*` | 0.75 / 1.30 | 实际/期望时长比值越界判 `too_short` / `too_long` |
+
+**每像素码率不进判据**：静态/低细节内容码率天然低，实测干净的 1080p 静止镜头 < 0.02 bpp 也完全清晰，
+拿它当"清晰度"会把正常片子判死（踩过）。真模糊要靠帧内高频能量，属后续升级。
+
+### L2 外观一致度怎么算（真像素）
+
+`probe.appearance_consistency(media, baseline_frame)`：取镜头 **50% 处**的一帧，与基线帧各压成
+**16×16 缩略图**，算归一化 RGB 欧氏距离 → `1 - 距离`。
+
+三个关键细节（都是实测标定出来的）：
+
+1. **基线要走同一条编码管线**：直接拿 PNG 参考图当基线，会掺进 h264 压掉高频细节的差异，
+   零漂移也能差出 0.12——那 0.12 会被误算成"不一致"。基线 = 参考图经同分辨率/同 CRF 编码后再取帧。
+2. **采样点取 50%**：避开片头黑场；且运镜的两条正弦周期成整数倍 → 50% 处平移量刚好归零，
+   画面正是"居中裁切"，与基线几何完全对齐，量出来的差就只剩漂移本身（对齐前实测差 0.12，对齐后 0.03）。
+3. **漂移在参考图上做一次，不逐帧做**：`noise` 是逐像素熵，1080p 逐帧跑实测 5s 片段 34MB/耗时 2 分钟；
+   改在图上做一次，结果等价（帧都是这张图的运动），体积降到 1MB 内、耗时 7s。
+
+标定曲线（720p@30，6 个不同配色 key）：
+
+| 参考强度 | 0.4 | 0.6 | 0.8 | 1.0（零漂移） |
+|---|---|---|---|---|
+| 一致度区间 | 0.77–0.82 | 0.84–0.88 | 0.91–0.93 | 0.97–0.98 |
+
+阈值 0.90 → 0.4/0.6 必失败、0.8 必通过：**"提高参考强度 0.4→0.6→0.8"这条路是量出来的、可复现的**。
+
+### 参数 → 可测指标（闭环能收敛的前提）
+
+| 内部语义参数 | 渲染行为 | 被哪层量出来 |
+|---|---|---|
+| `input.resolution` | 输出分辨率（默认 640x360） | L1 清晰度 |
+| `input.fps` | 输出帧率（默认 15） | L1 帧率 |
+| `input.audio_gain_db` | 音轨增益（基线 -24dB → 实测 ≈-45dB） | L1 音量 |
+| `input.trim_black` | 是否去掉片头黑场 | L1 黑帧 |
+| `constraints.motion_scale` | 运镜平移幅度（0 = 真静止） | L1 静止 |
+| `constraints.reference_strength` | 色彩/亮度/噪声漂移（1 = 零漂移） | L2 一致度 |
+
+同类规则也回填进了 **MockVideoExecutor**：物理缺陷概率不再是纯随机，而是挂在分辨率/帧率/增益/
+`trim_black`/`motion_scale` 上——否则 Refiner 的调参永远修不好它，末次尝试随机中一个就终态 FAIL（实测踩过）。
+
+### 运镜的坑
+
+- 从 0 开始的余弦推镜：前 1.4s 几乎不动 → `freezedetect`（正确地）判成"画面静止"。改成**平移为主**。
+- 素材太"平"（纯渐变）：平移每帧像素几乎不变，同样被正确地判成静止。参考图必须**有纹理细节**。
+- 重试占**同一镜头位**：`shot_<task_id>.mp4` 按任务 id 命名 + 显式镜头位映射，
+  成片永远拼"每个镜头位最新那一版"，不会把最早那版废片拼进去（踩过）。
+- 片头黑场的随机判据**不含 attempts**：同一任务的"坏习惯"跨重生成是稳定的，必须显式 `trim_black` 才消除；
+  否则缺陷在重试间忽有忽无，闭环学不到因果。
 
 ## Web 控制台设计（客户端）
 
@@ -106,7 +186,10 @@ hxmv/
   历史仍在，前端可整 run 回放（`GET /api/run/<id>`）。SSE 先回放已落盘事件再实时推送，
   订阅者不会漏事件。
 - **provider 选择**：daemon 提交时带 provider 参数，worker 执行前设 `HXMV_PROVIDER`
-  环境变量（串行安全）；mock/fake/kling 三选一。
+  环境变量（串行安全）；mock/fake/local/kling 四选一。
+- **产物取回**：worker 同时把 `HXMV_ARTIFACTS` 指到本 run 的 `runs/<id>/artifacts/`，
+  面板用 `GET /api/artifact?run_id=&name=`（同 token 防护 + 文件名白名单防目录穿越）
+  直接播放/下载成片与镜头——"真产物"这件事在浏览器里就能验证。
 - **产物形态**：run.done 事件带 completed/failed/预算/大脑统计，`summary()` 同源数据。
 - 坑（实测）：面板 JS 里 `forEach` 回调内 `continue` 是非法的（SyntaxError 会让整个
   script 不执行，页面看起来「全没反应」）——要跳过元素用 `for...of` 循环或 `return`。

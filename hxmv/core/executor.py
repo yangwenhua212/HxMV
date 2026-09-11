@@ -45,14 +45,33 @@ class MockVideoExecutor(Executor):
         h = hashlib.md5(f"{task.task_id}:{task.retry_policy.get('attempts', 0)}:{task.input}".encode()).hexdigest()
         return random.Random(int(h[:8], 16))
 
-    def _physics_defects(self, rng: random.Random) -> list[str]:
-        """L1 物理缺陷：与参数基本无关，纯随机（真实世界也一样——物理缺陷看命）。"""
-        table = [
-            ("black_frame", 0.04), ("low_clarity", 0.07),
-            ("motion_blur", 0.10), ("fps_too_low", 0.04),
-            ("low_volume", 0.04),
-        ]
-        return [d for d, p in table if rng.random() < p]
+    def _physics_defects(self, rng: random.Random, task: Task) -> list[str]:
+        """L1 物理缺陷：**必须与参数挂钩**，否则 Refiner 的调参永远修不好它
+        （v0.4 修正：旧版纯随机 → 末次尝试随机中一个就终态 FAIL，闭环白跑）。
+
+        概率按\"低端生成器\"的脾气标定：分辨率/帧率/增益/trim_black 都是真能改好的旋钮。
+        """
+        inp = task.input
+        res = str(inp.get("resolution") or "")
+        height = {"480p": 480, "720p": 720, "1080p": 1080}.get(res, 360)
+        p_clarity = 0.07 if height < 480 else 0.04 if height < 720 else 0.0
+
+        fps = float(inp.get("fps") or 0)
+        p_fps = 0.05 if not fps else (0.02 if fps < 24 else 0.0)
+
+        gain = inp.get("audio_gain_db")
+        p_volume = 0.05 if gain is None else (0.02 if float(gain) < 6 else 0.0)
+
+        p_black = 0.0 if inp.get("trim_black") else 0.05
+
+        motion = float(task.constraints.get("motion_scale", 0.4))
+        p_blur = max(0.0, 0.05 + motion * 0.13)      # 运动越大越容易糊
+        p_freeze = 0.05 if motion <= 0.05 else 0.0   # 不给运动 → 画面静止
+
+        table = [("black_frame", p_black), ("low_clarity", p_clarity),
+                 ("motion_blur", p_blur), ("fps_too_low", p_fps),
+                 ("low_volume", p_volume), ("frozen_frame", p_freeze)]
+        return [d for d, p in table if p and rng.random() < p]
 
     def _consistency_defects(self, rng: random.Random, task: Task) -> list[str]:
         """L2 一致性缺陷：与 reference_strength 强相关（Refiner 能修）。"""
@@ -85,7 +104,7 @@ class MockVideoExecutor(Executor):
                     "cost_units": cost}
 
         if task.action == ACTION_GENERATE_SHOT:
-            defects = (self._physics_defects(rng)
+            defects = (self._physics_defects(rng, task)
                        + self._consistency_defects(rng, task)
                        + self._semantic_defects(rng, task))
             return {
@@ -137,10 +156,13 @@ class ProviderExecutor(Executor):
 
 
 def make_executor():
-    """工厂：HXMV_PROVIDER=fake/kling → ProviderExecutor；否则/失败落 Mock。"""
+    """工厂：HXMV_PROVIDER=local/fake/kling → ProviderExecutor；否则/失败落 Mock。"""
     name = os.environ.get("HXMV_PROVIDER", "").lower()
     if name:
         try:
+            if name == "local":
+                from ..providers.local_render import LocalRenderProvider
+                return ProviderExecutor(LocalRenderProvider())
             if name == "fake":
                 from ..providers.fake_api import FakeApiProvider
                 return ProviderExecutor(FakeApiProvider())

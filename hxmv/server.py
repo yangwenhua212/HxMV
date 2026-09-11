@@ -37,7 +37,7 @@ WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "inde
 # （header X-Hxmv-Token 或 query ?token=，EventSource 只能用 query）
 HXMV_WEB_TOKEN = os.environ.get("HXMV_WEB_TOKEN", "")
 
-PROVIDERS = {"mock": "", "fake": "fake", "kling": "kling"}
+PROVIDERS = {"mock": "", "fake": "fake", "local": "local", "kling": "kling"}
 
 
 class RunRecorder:
@@ -111,6 +111,8 @@ class RunManager:
             if rec is None:
                 continue
             os.environ["HXMV_PROVIDER"] = job["provider"] or ""  # 串行 worker，安全
+            # 产物落到本 run 自己的目录：面板就能按 run 取回真文件（local provider 用）
+            os.environ["HXMV_ARTIFACTS"] = os.path.join(RUNS_DIR, run_id, "artifacts")
             try:
                 run(job["goal"], brain=Brain(), verbose=False, emit=rec.emit)
             except Exception as e:  # 内核异常也要把 run 收尾，别让订阅者挂死
@@ -172,7 +174,7 @@ def _scan_runs() -> list[dict]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HxMV/0.1"
+    server_version = "HxMV/0.4"
 
     # ---- helpers ----
     def _send_json(self, obj, code: int = 200) -> None:
@@ -240,6 +242,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/runs":
             self._send_json({"runs": _scan_runs()})
+            return
+
+        if p == "/api/artifact":
+            # 取回某个 run 的真实产物（local provider 渲出来的 mp4/png）。
+            # 只看 run 目录下的 artifacts/，文件名做白名单校验，防穿越。
+            from urllib.parse import parse_qs
+            qs = parse_qs(u.query)
+            run_id = (qs.get("run_id") or [""])[0]
+            name = (qs.get("name") or [""])[0]
+            if (not run_id or not name or "/" in name or "\\" in name
+                    or name.startswith(".") or not run_id.replace("-", "").isalnum()):
+                self._send_err(400, "run_id/name 不合法")
+                return
+            path = os.path.join(RUNS_DIR, run_id, "artifacts", name)
+            if not os.path.isfile(path):
+                self._send_err(404, f"产物不存在: {name}")
+                return
+            ctype = "video/mp4" if name.endswith(".mp4") else \
+                "image/png" if name.endswith(".png") else "application/octet-stream"
+            with open(path, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", f'inline; filename="{name}"')
+            self.end_headers()
+            self.wfile.write(body)
             return
 
         if p.startswith("/api/run/") and not p.endswith("/events"):

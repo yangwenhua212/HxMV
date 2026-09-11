@@ -43,23 +43,56 @@ class MockPlanner(Planner):
         self._brain = brain
 
     def _learnt_strength(self, failure_key: str, base: float) -> float:
-        """从大脑读取同类失败经验：命中越多，起手参数越稳。"""
+        """从大脑读取同类失败经验：**被验证的次数**越多，起手参数越稳。
+
+        用 meta.times（该修正被验证成功的次数）而不是"记忆条数"——同源经验会累积成一条，
+        按条数算会永远停在第一档（实测踩过：连跑几次起手强度一直 0.45）。
+        """
         if not self._brain:
             return base
-        hits = sum(1 for e in self._brain.recall(failure_key, top_k=10)
-                   if e.kind == "LESSON" and e.meta.get("failure") == failure_key)
-        return min(1.0, base + 0.05 * hits)  # 每条经验 +0.05
+        hits = 0
+        for e in self._brain.entries:
+            if e.kind == "LESSON" and e.meta.get("failure") == failure_key:
+                hits += int(e.meta.get("times", 1))
+        return min(1.0, base + 0.05 * hits)  # 每次验证 +0.05
+
+    def _learnt_params(self) -> tuple[dict, list[str]]:
+        """从大脑里学到"这个生成器的脾气"，直接按**验证过的参数**起手。
+
+        这是 mock 版的"规划时带着记忆"（真 LLM 规划走 Brain.inject 注入同样的经验文本）：
+        上次量出低清晰度/低帧率/音轨轻/黑场并修好了，这次就别再踩——第一步就该是对的。
+        """
+        if not self._brain:
+            return {}, []
+        learned = {e.meta.get("suggestion") for e in self._brain.entries if e.kind == "LESSON"}
+        values = {"resolution": "720p", "fps": 30, "audio_gain_db": 10.0, "trim_black": True}
+        pairs = (("resolution", "increase_resolution", "720p"),
+                 ("fps", "increase_fps", "30fps"),
+                 ("audio_gain_db", "boost_audio_gain", "+10dB"),
+                 ("trim_black", "trim_black_frames", "去黑场"))
+        inp, notes = {}, []
+        for key, sug, label in pairs:
+            if sug in learned:
+                inp[key] = values[key]
+                notes.append(label)
+        return inp, notes
 
     def next_task(self, state: ExecutionState) -> Task | None:
         if not self._built:
             base = _first_scene_prompt(state.goal)
             s_char = self._learnt_strength("character_inconsistency", 0.4)
             s_scene = self._learnt_strength("scene_inconsistency", 0.4)
+            seeded, notes = self._learnt_params()
             shot_constraints = {"character": "cat", "style": "cinematic", "scene": "s01",
                                 "continuity": True, "reference_strength": s_char,
                                 "scene_strength": s_scene}
-            if s_char > 0.4 or s_scene > 0.4:
-                state.log(f"🧠 记忆起手：reference_strength {s_char:.2f} / scene {s_scene:.2f}（上次学到的）")
+            if s_char > 0.4 or s_scene > 0.4 or notes:
+                state.log(f"🧠 记忆起手：reference_strength {s_char:.2f} / scene {s_scene:.2f}"
+                          + (f" / {'、'.join(notes)}" if notes else "") + "（上次学到的）")
+            shot1 = {"prompt": base, "duration": 5, "seed": 101}
+            shot2 = {"prompt": base + "，特写", "duration": 5, "seed": 202}
+            shot1.update(seeded)
+            shot2.update(seeded)
             self._queue = [
                 Task(ACTION_STORYBOARD,
                      input={"goal": state.goal},
@@ -71,10 +104,10 @@ class MockPlanner(Planner):
                      input={"prompt": base},
                      constraints={"style": "cinematic", "scene_key": "s01"}),
                 Task(ACTION_GENERATE_SHOT,
-                     input={"prompt": base, "duration": 5, "seed": 101},
+                     input=shot1,
                      constraints=dict(shot_constraints)),
                 Task(ACTION_GENERATE_SHOT,
-                     input={"prompt": base + "，特写", "duration": 5, "seed": 202},
+                     input=shot2,
                      constraints=dict(shot_constraints)),
                 Task(ACTION_COMPOSE,
                      input={"shots": ["shot#1", "shot#2"], "output": "final.mp4"},

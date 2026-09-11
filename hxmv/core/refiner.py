@@ -9,23 +9,31 @@ from __future__ import annotations
 
 from .state import Task
 
-# suggestion → 参数调整（V0.1 的调参表；接真实生成器后按工具能力扩展）
+# suggestion → 参数调整（v0.4 起这些调整对**真实渲染**同样成立：参数真改变量出来的指标）
 _ADJUST = {
     # (目标位置, 参数名, 步进量 or None=直接设值, 封顶/目标值)
     "increase_reference_strength": ("constraints", "reference_strength", 0.2, 1.0),
     "reduce_motion_scale":         ("constraints", "motion_scale", -0.25, 0.2),
-    "increase_resolution":         ("input", "resolution", None, "1080p"),
+    "increase_motion_scale":       ("constraints", "motion_scale", 0.3, 1.5),
+    "increase_resolution":         ("input", "resolution", None, "720p"),
     "increase_fps":                ("input", "fps", None, 30),
-    "boost_audio_gain":            ("input", "audio_gain_db", None, 6.0),
+    "boost_audio_gain":            ("input", "audio_gain_db", None, 10.0),
+    "trim_black_frames":           ("input", "trim_black", None, True),
+    "extend_duration":             ("input", "duration", 1.0, 30.0),
+    "trim_duration":               ("input", "duration", -1.0, 1.0),
     "rewrite_prompt_closer":       ("input", "_semantic_guard", None, True),
 }
 
 _HUMAN_HINT = {
     "increase_reference_strength": "角色/场景一致性差 → 提高参考强度",
     "reduce_motion_scale": "运动模糊 → 降低运动幅度",
-    "increase_resolution": "清晰度不足 → 升分辨率",
+    "increase_motion_scale": "画面静止 → 提高运动幅度",
+    "increase_resolution": "清晰度不足 → 升到 720p",
     "increase_fps": "帧率不足 → 提到 30fps",
-    "boost_audio_gain": "音量低 → 增益 +6dB",
+    "boost_audio_gain": "音量低 → 增益 +10dB",
+    "trim_black_frames": "片头黑帧 → 去掉黑场",
+    "extend_duration": "时长不足 → 补时长",
+    "trim_duration": "超时长 → 裁时长",
     "rewrite_prompt_closer": "不符剧本 → 加强语义贴合约束",
 }
 
@@ -68,7 +76,8 @@ class Refiner:
         for f, s in pairs:
             hint = self._memory_hint(f, memory or {})
             chosen.append((f, hint if hint else s))
-        chosen = chosen[:2]  # 一次最多应用两条修正，避免参数打架
+        chosen = chosen[:4]  # 一次最多应用四条修正：分辨率/帧率/音量/黑场/参考强度彼此正交，
+        # 上限只是护栏（防未来出现互相打架的旋钮），不是省钱手段——一次修到位比来回烧预算好。
 
         new_task = task.child()
         notes, applied = [], []

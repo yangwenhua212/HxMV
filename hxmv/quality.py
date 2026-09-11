@@ -45,9 +45,10 @@ class QualityReport:
         )
 
     def __str__(self) -> str:  # 给终端日志用的单行摘要
+        tail = f" · {self.detail}" if self.detail else ""
         if self.passed:
-            return f"[{self.layer}] ✓ 通过 (score={self.score:.2f})"
+            return f"[{self.layer}] ✓ 通过 (score={self.score:.2f}){tail}"
         return (
             f"[{self.layer}] ✗ 失败 score={self.score:.2f} "
-            f"failures={self.failures[:3]} → {self.suggestions[:2]}"
+            f"failures={self.failures[:3]} → {self.suggestions[:2]}{tail}"
         )

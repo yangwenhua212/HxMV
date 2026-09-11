@@ -37,7 +37,7 @@ class Task:
     input: dict = field(default_factory=dict)          # prompt/duration/seed...
     constraints: dict = field(default_factory=dict)    # character/style/continuity/reference_strength
     quality: dict = field(default_factory=lambda: {"min_score": 0.82})
-    retry_policy: dict = field(default_factory=lambda: {"max_attempts": 3, "attempts": 0})
+    retry_policy: dict = field(default_factory=lambda: {"max_attempts": 4, "attempts": 0})
     status: TaskStatus = TaskStatus.PENDING
     result: dict = field(default_factory=dict)         # executor 产物（V0.1 为 mock 元数据）
     refine_history: list[str] = field(default_factory=list)  # 每次修正的说明（给人看）

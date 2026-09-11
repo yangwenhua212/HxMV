@@ -18,8 +18,10 @@ print 保真（终端演示），emit 供客户端实时展示。事件 = 观察
 """
 from __future__ import annotations
 
+import os
 import time
 
+from ..media import probe
 from ..providers.base import ProviderError
 from .brain import Brain
 from .context import ContextManager
@@ -32,7 +34,7 @@ from .state import ExecutionState, TaskStatus
 
 def banner(state: ExecutionState) -> None:
     print("\n" + "═" * 52)
-    print(f"  HxMV 自主控制闭环  v0.1.1")
+    print(f"  HxMV 自主控制闭环  v0.4 · 真产物 + 真眼睛")
     print(f"  目标：{state.goal}")
     print("═" * 52)
 
@@ -47,6 +49,25 @@ def summary(state: ExecutionState) -> None:
               + (f"  [修正: {t.refine_history[-1]}]" if t.refine_history else ""))
     for t in state.failed:
         print(f"  ❌ {t.action:24s} {t.task_id}  尝试耗尽终态失败")
+    # 真实产物：只有落盘的真文件才列（mock 世界的占位字符串不在此列），同一路径只列一次
+    artifacts, seen = [], set()
+    for t in state.completed:
+        for key in ("media", "output", "asset", "reference"):
+            p = t.result.get(key)
+            if p and os.path.isfile(str(p)) and str(p) not in seen:
+                seen.add(str(p))
+                artifacts.append((t.action, key, str(p)))
+    if artifacts:
+        print("\n  🎬 真实产物（落盘文件）:")
+        for action, key, p in artifacts:
+            names = {"media": "镜头", "output": "成片", "asset": "资产", "reference": "参考图"}
+            print(f"    · {names.get(key, key):4s} {p}  ({os.path.getsize(p)/1024:.0f} KB)")
+    real = [t for t in state.completed if t.result.get("metrics")]
+    if real:
+        print("\n  👁 实测指标（ffmpeg/ffprobe 从媒体里量的，不是标签）:")
+        for t in real:
+            f = t.result.get("media") or t.result.get("output") or ""
+            print(f"    · {os.path.basename(str(f)):24s} → {probe.describe(t.result['metrics'])}")
     print(f"\n  总尝试 {state.budget.attempts} 次 | 总成本 {state.budget.used:.2f} 元"
           f" | 迭代 {state.iteration} 轮")
     mem = state.memory.get("quality", {})
@@ -87,8 +108,9 @@ def _report_brief(report) -> dict:
 
 
 def _result_brief(result: dict) -> dict:
-    keys = ("storyboard", "asset", "media", "duration", "fps",
-            "defects", "output", "shots", "params", "cost_units")
+    keys = ("storyboard", "asset", "media", "duration", "fps", "resolution",
+            "defects", "output", "shots", "params", "cost_units",
+            "metrics", "consistency", "reference")
     return {k: result[k] for k in keys if k in result}
 
 
@@ -193,6 +215,10 @@ def run(goal: str,
                "passed": report.passed,
                "failures": list(report.failures),
                "suggestions": list(report.suggestions),
+               "detail": report.detail,
+               "measured": {"metrics": result.get("metrics"),
+                            "consistency": result.get("consistency")}
+                           if (result.get("metrics") or result.get("consistency") is not None) else None,
                "layers": [_report_brief(r) for r in critic.evaluate_layers(task, result)]
                          if hasattr(critic, "evaluate_layers") else []})
         if verbose:
