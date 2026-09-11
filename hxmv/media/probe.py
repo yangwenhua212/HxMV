@@ -102,12 +102,25 @@ def is_media_file(path: str | None) -> bool:
 
 
 def _fps(text: str) -> float | None:
-    """'30000/1001' → 29.97；'15/1' → 15.0。"""
-    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$", text or "")
-    if not m:
+    """'30000/1001' → 29.97；'15/1' → 15.0；'30' → 30.0。
+
+    ffprobe 对多数 muxer 报 ``num/den``，但部分源直接给整数（'30'）——
+    旧实现只认 num/den，遇到整数帧率返回 None，导致 fps 全链路失效
+    （detect_defects 判 fps_too_low 与 COMPOSE 取 fps 都会错误回落默认值）。
+    """
+    text = (text or "").strip()
+    if not text:
         return None
-    num, den = float(m.group(1)), float(m.group(2))
-    return num / den if den else None
+    if "/" in text:
+        try:
+            num, den = (float(x) for x in text.split("/", 1))
+        except ValueError:
+            return None
+        return num / den if den else None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 # ---------- 单指标探针 ----------

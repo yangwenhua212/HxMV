@@ -11,7 +11,6 @@
 """
 import argparse
 import os
-import sys
 
 from .core.brain import Brain
 from .core.loop import run

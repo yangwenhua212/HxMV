@@ -34,7 +34,7 @@ from .state import ExecutionState, TaskStatus
 
 def banner(state: ExecutionState) -> None:
     print("\n" + "═" * 52)
-    print(f"  HxMV 自主控制闭环  v0.6 · 真 AI 视频 + 项目档案")
+    print("  HxMV 自主控制闭环  v0.6 · 真 AI 视频 + 项目档案")
     print(f"  目标：{state.goal}")
     print("═" * 52)
 
@@ -150,7 +150,6 @@ def run(goal: str,
 
     state = ExecutionState(goal=goal)
     brain = brain or Brain()
-    provider_hint = ""
     if verbose:
         banner(state)
         if project is not None:
@@ -236,8 +235,7 @@ def run(goal: str,
                "measured": {"metrics": result.get("metrics"),
                             "consistency": result.get("consistency")}
                            if (result.get("metrics") or result.get("consistency") is not None) else None,
-               "layers": [_report_brief(r) for r in critic.evaluate_layers(task, result)]
-                         if hasattr(critic, "evaluate_layers") else []})
+               "layers": [_report_brief(r) for r in getattr(report, "layers", [])]})
         if verbose:
             print(f"  👁 {report}")
         decision = controller.update(state, task, result, report)

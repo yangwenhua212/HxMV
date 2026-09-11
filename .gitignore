@@ -4,18 +4,27 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # 环境与密钥
 .env
 *.key
 *.jks
 
-# IDE
+# IDE / 编辑器
 .idea/
 .vscode/
 *.swp
+.DS_Store
 
-# 产物
+# 产物与运行数据
 output/
 *.mp4
 *.tmp
+*.log
