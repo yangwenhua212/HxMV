@@ -20,8 +20,7 @@ from __future__ import annotations
 from ..media import probe
 from ..quality import QualityReport
 from .state import (
-    ACTION_COMPOSE, ACTION_GENERATE_CHARACTER, ACTION_GENERATE_SCENE,
-    ACTION_GENERATE_SHOT, Task,
+    ACTION_COMPOSE, ACTION_GENERATE_SHOT, Task,
 )
 from . import llm
 
@@ -169,7 +168,11 @@ class PipelineCritic:
         return [layer.evaluate(task, result) for layer in self.layers]
 
     def evaluate(self, task: Task, result: dict) -> QualityReport:
+        layers = self.evaluate_layers(task, result)
         merged = QualityReport(layer="PIPELINE", score=1.0)
-        for r in self.evaluate_layers(task, result):
+        for r in layers:
             merged = merged.merge(r)
+        # 缓存各层报告供循环/客户端复用（原来循环会再 evaluate 一遍，
+        # 真媒体路径等于把 ffprobe/ffmpeg 解码重复跑两次——纯浪费）
+        merged.layers = layers
         return merged

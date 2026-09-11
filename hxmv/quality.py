@@ -20,6 +20,7 @@ class QualityReport:
     failures: list[str] = field(default_factory=list)   # 机器可判定的失败原因（kebab-case）
     suggestions: list[str] = field(default_factory=list)  # 可执行的修正建议
     detail: str = ""      # 给人看的说明
+    layers: list = field(default_factory=list)  # PIPELINE 合并前各层报告（循环复用，避免二次评估）
 
     @property
     def passed(self) -> bool:

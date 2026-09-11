@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hxmv"
+version = "0.6.0"
+description = "Autonomous content-production control loop: plan → execute → observe → judge → refine (self-hosted, one owner per instance)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["agent", "autonomous", "content", "video", "control-loop", "zero-dependency"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# 运行时零第三方依赖（stdlib only；ffmpeg/ffprobe 为可选运行时依赖）
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+hxmv = "hxmv.__main__:main"
+hxmv-server = "hxmv.server:main"
+
+[tool.setuptools.packages.find]
+include = ["hxmv*"]
+
+[tool.setuptools.package-data]
+hxmv = ["web/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# 只抓能抓 bug 的规则（F=pyflakes 未用import/未用变量，E9=语法/运行时错误）。
+# 不选 I/UP/E501 等风格规则：仓库刻意保持窄规则集，避免为风格噪音大改动。
+select = ["F", "E9"]
