@@ -86,6 +86,15 @@
 
 <main>
   <section>
+    <div class="card" id="authCard">
+      <h3>连接</h3>
+      <div class="row">
+        <input id="tokenInput" placeholder="令牌（HxMV 实例的 HXMV_WEB_TOKEN）">
+        <button id="connectBtn">连接</button>
+        <span id="connStatus">未填令牌</span>
+      </div>
+    </div>
+
     <div class="card" id="submitCard">
       <h3>开始生产</h3>
       <textarea id="goalInput" placeholder="想做什么内容？例如：一只柯基在雪地里打滚，8 秒短片"></textarea>
@@ -133,13 +142,34 @@ let currentRun = null, es = null, hintTimer = null;
 
 // ---- 公网 token ----
 const URLTOKEN = new URLSearchParams(location.search).get("token") || "";
-const TOKEN = URLTOKEN || localStorage.getItem("hxmvToken") || "";
+let TOKEN = URLTOKEN || localStorage.getItem("hxmvToken") || "";
 if (URLTOKEN) localStorage.setItem("hxmvToken", URLTOKEN);
 function hx(path, opts = {}) {
   opts.headers = Object.assign({ "X-Hxmv-Token": TOKEN }, opts.headers || {});
   return fetch(path, opts);
 }
 function sseUrl(path) { return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN); }
+
+// 页面上直接填令牌（原来只能靠 ?token= 进网址，没填就等于用不了）
+async function refreshConn() {
+  const el = $("connStatus");
+  if (!TOKEN) { el.textContent = "未填令牌"; return; }
+  try {
+    const d = await (await hx("/api/health")).json();
+    el.textContent = (d.needs_token && !d.authed) ? "令牌不对" : "已连接 · " + d.server;
+  } catch (e) {
+    el.textContent = "连不上";
+  }
+}
+$("tokenInput").value = TOKEN;
+$("connectBtn").onclick = () => {
+  TOKEN = $("tokenInput").value.trim();
+  localStorage.setItem("hxmvToken", TOKEN);
+  refreshConn();
+  refreshBrain();
+  refreshRuns();
+};
+$("tokenInput").addEventListener("keydown", e => { if (e.key === "Enter") $("connectBtn").click(); });
 
 // ---- 人话字典（渲染层翻译，内核事件不动） ----
 const ACTIONS = { STORYBOARD: "分镜", GENERATE_CHARACTER: "角色", GENERATE_SCENE: "场景", GENERATE_SHOT: "镜头", COMPOSE: "成片" };
@@ -333,6 +363,7 @@ async function replay(runId) {
 
 $("runBtn").onclick = submitRun;
 $("goalInput").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitRun(); });
+refreshConn();
 refreshBrain(); refreshRuns();
 setInterval(refreshBrain, 10000);
 </script>
