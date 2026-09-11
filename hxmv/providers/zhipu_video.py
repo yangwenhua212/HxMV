@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.request
 
+from .. import USER_AGENT
 from ..core import config
 from ..media import probe
 from .base import ProviderError, VideoProvider
@@ -101,12 +102,14 @@ class ZhipuVideoProvider(VideoProvider):
         req = urllib.request.Request(
             f"{self.base}/{path}", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json;charset=utf-8",
+                     "User-Agent": USER_AGENT,
                      "Authorization": f"Bearer {self.key}"}, method="POST")
         return self._send(req, "提交任务")
 
     def _get_json(self, path: str) -> dict:
         req = urllib.request.Request(f"{self.base}/{path}",
-                                     headers={"Authorization": f"Bearer {self.key}"})
+                                     headers={"User-Agent": USER_AGENT,
+                                              "Authorization": f"Bearer {self.key}"})
         return self._send(req, "查询任务")
 
     def _send(self, req, what: str) -> dict:
@@ -158,7 +161,8 @@ class ZhipuVideoProvider(VideoProvider):
     def _download(self, url: str, dest: str) -> None:
         for attempt in (1, 2, 3):
             try:
-                with urllib.request.urlopen(url, timeout=180) as resp, open(dest, "wb") as f:
+                req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=180) as resp, open(dest, "wb") as f:
                     while True:
                         chunk = resp.read(1 << 16)
                         if not chunk:

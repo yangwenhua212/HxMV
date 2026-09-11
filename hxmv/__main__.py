@@ -29,6 +29,8 @@ def main() -> int:
     ap.add_argument("--set-key", nargs=2, default=None, metavar=("PROVIDER", "KEY"),
                     help="写入 API Key 到 ~/.hxmv/config.json（例：--set-key zhipu <你的key>）")
     ap.add_argument("--key-status", action="store_true", help="查看各 provider 的 Key 是否已配置")
+    ap.add_argument("--doctor", action="store_true",
+                    help="部署自检：Python/ffmpeg/编码器/Key/目录/端口，缺什么给什么修复命令")
     ap.add_argument("--out", default=None, help="产物目录（local provider 用，默认 ~/.hxmv/artifacts/<时间戳>）")
     ap.add_argument("--project", default=None, help="项目名：跨 run 记住风格/角色/已生成画面，续做时不重新生成")
     ap.add_argument("--episode", type=int, default=None, help="第几集（默认自动递增）")
@@ -52,6 +54,13 @@ def main() -> int:
             k = config.api_key(prov)
             print(f"  {prov:8s} {'✅ 已配置 ' + config.mask(k) if k else '❌ 未配置'}")
         return 0
+    if args.doctor:
+        from .core import doctor
+        checks = doctor.run_checks()
+        print(doctor.render(checks))
+        hard = [c for c in checks if not c["ok"] and c["name"] in
+                ("Python", "ffmpeg/ffprobe", "数据目录可写")]
+        return 1 if hard else 0
 
     if args.list_projects:
         from .core.project import Project, PROJECTS_DIR
@@ -87,14 +96,27 @@ def main() -> int:
         project.save()
 
     goal = " ".join(args.goal) or "一只小猫在花园里追蝴蝶，5 秒钟短视频"
+    done: dict = {}
+
+    def _capture(event: dict) -> None:
+        if event.get("type") == "run.done":
+            done.update(event)
+
     try:
-        run(goal, brain=brain, project=project, episode=args.episode)
+        run(goal, brain=brain, project=project, episode=args.episode, emit=_capture)
     except KeyboardInterrupt:
         print("\n⏹ 已手动停止（大脑已保存）")
         return 130
     out = os.environ.get("HXMV_ARTIFACTS")
     if out and os.path.isdir(out):
         print(f"  📁 产物目录：{out}")
+    # 命令行跑完也能把成品推给客户端（HXSync/飞书）——服务器跑的那条路在 server.py 里
+    if done and os.environ.get("HXMV_NOTIFY_URL"):
+        from .core import notify as _notify
+        arts = out or (os.path.join(project.dir, "artifacts") if project else "")
+        payload = _notify.build_payload(goal, done, arts,
+                                        base=os.environ.get("HXMV_PUBLIC_BASE", ""))
+        print(f"  📤 推送成品：{_notify.notify(payload)}")
     return 0
 
 

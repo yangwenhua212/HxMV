@@ -10,6 +10,13 @@
     GET  /api/run/<id>           → 该 run 的全部事件（历史回放）
     GET  /api/runs               → run 历史摘要列表
     GET  /api/brain              → 大脑条目（只读展示）
+    GET  /api/health             → **自检 + 能力**（HxSync 等客户端用来"发现实例"）
+    GET  /api/artifact?run_id=&name= → 取产物文件（成片/镜头/参考图）
+
+客户端友好（HxSync）：
+    · /api/health 可被客户端扫描发现（本地 127.0.0.1 或远端域名都行）
+    · 跑完可主动推送：设 HXMV_NOTIFY_URL（JSON webhook 或 feishu:<机器人地址>），
+      见 core/notify.py——切后台/断长连接也不丢成品
 
 架构：loop.run(goal, emit=cb) 的事件旁路。worker 单线程串行跑（Brain 单文件，
 并发写会打架）；每个 run 事件落盘 ~/.hxmv/runs/<id>/events.jsonl 并广播给
@@ -31,6 +38,7 @@ from .core.brain import Brain
 from .core.loop import run
 
 RUNS_DIR = os.path.expanduser("~/.hxmv/runs")
+STARTED_AT = time.time()
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html")
 
 # 公网防护：设置 HXMV_WEB_TOKEN 后，所有 /api/* 请求需带 token
@@ -123,11 +131,27 @@ class RunManager:
                     verbose=False, emit=rec.emit)
             except Exception as e:  # 内核异常也要把 run 收尾，别让订阅者挂死
                 rec.emit({"type": "run.done", "phase": "ERROR",
-                          "error": str(e), "completed": [], "failed": [],
-                          "attempts": 0, "cost_units": 0, "iterations": 0,
-                          "budget_exhausted": False, "brain": {}, "outputs": []})
+                          "error": str(e), "completed": [], "failed": [], "attempts": 0,
+                          "cost_units": 0, "iterations": 0, "budget_exhausted": False,
+                          "brain": {}, "outputs": []})
             finally:
                 rec.done = True
+                self._notify_done(run_id, job, rec)
+
+    @staticmethod
+    def _notify_done(run_id: str, job: dict, rec) -> None:
+        """跑完主动把成品推给客户端（HxSync）。通知失败绝不影响生产。"""
+        from .core import notify as _notify
+        if not os.environ.get("HXMV_NOTIFY_URL"):
+            return
+        done = next((e for e in reversed(rec.events) if e.get("type") == "run.done"), {})
+        base = os.environ.get("HXMV_PUBLIC_BASE", "")
+        payload = _notify.build_payload(job.get("goal", ""), done,
+                                       os.path.join(RUNS_DIR, run_id, "artifacts"),
+                                       base=base, run_id=run_id)
+        payload["project"] = job.get("project") or None
+        payload["provider"] = job.get("provider") or "mock"
+        rec.emit({"type": "notify", "result": _notify.notify(payload)})
 
 
 MANAGER = RunManager()
@@ -235,6 +259,33 @@ class Handler(BaseHTTPRequestHandler):
             self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
             return
 
+        if p in ("/api/health", "/healthz"):
+            # 客户端"发现实例"用：本地跑还是远端跑，一次探测就知道能力与配置齐不齐
+            from .media import probe
+            from .core import config
+            from . import __version__ as _v
+            from .core.project import Project
+            projects = []
+            try:
+                projects = Project.list_all()
+            except Exception:
+                pass
+            self._send_json({
+                "ok": True, "name": "hxmv", "version": _v, "server": self.server_version,
+                "ffmpeg": probe.has_ffmpeg(),
+                "encoder": probe.encoder_name() if probe.has_ffmpeg() else None,
+                "providers": {name: {"ready": True if name == "mock" or name == "local"
+                                     else config.configured(name)}
+                              for name in PROVIDERS},
+                "projects": [{"id": x.get("id"), "episodes": x.get("episodes")} for x in projects],
+                "runs": len(_scan_runs()),
+                "needs_token": bool(HXMV_WEB_TOKEN),
+                "notify": bool(os.environ.get("HXMV_NOTIFY_URL")),
+                "uptime_s": round(time.time() - STARTED_AT, 1),
+                "run_url": "/api/run", "stream_url": "/api/stream",
+            })
+            return
+
         if p == "/api/brain":
             brain = Brain()
             entries = []
@@ -288,7 +339,10 @@ class Handler(BaseHTTPRequestHandler):
                 for line in f:
                     if line.strip():
                         events.append(json.loads(line))
-            self._send_json({"run_id": run_id, "status": "done" if events and events[-1].get("type") == "run.done" else "running", "events": events})
+            # 状态要看"事件里有没有 run.done"，而不是"最后一条是不是 run.done"——
+            # 收尾之后还会有 notify 之类的事件（实测踩过：notify 一加，状态永远停在 running）
+            status = "done" if any(e.get("type") == "run.done" for e in events) else "running"
+            self._send_json({"run_id": run_id, "status": status, "events": events})
             return
 
         if p.startswith("/api/stream"):

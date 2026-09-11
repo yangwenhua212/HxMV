@@ -23,6 +23,7 @@ import time
 
 from ..media import probe
 from ..providers.base import ProviderError
+from .artifacts import consolidate_artifacts
 from .brain import Brain
 from .context import ContextManager
 from .controller import Controller
@@ -261,19 +262,27 @@ def run(goal: str,
 
     state.phase = "DONE"
     state.current = None
+    # 归拢"本次 run 真正用到的成品"——复用自项目档案的旧文件也算本次的产物。
+    # 不这么做的话：全是复用的时候产物目录是空的，面板/客户端会以为"什么都没产出"（实测踩过）。
+    artifact_paths = consolidate_artifacts(state, os.environ.get("HXMV_ARTIFACTS", ""))
     if verbose:
         summary(state)
         print(f"  🧠 大脑已更新：{brain.stats()}（经验持久化到 {brain.path}）")
+        if artifact_paths:
+            print(f"  🎬 本次成品 {len(artifact_paths)} 个（含复用）："
+                  + "、".join(os.path.basename(p) for p in artifact_paths[:4]))
     brain.save()
     if project is not None:
-        outputs = [t.result.get("output") or t.result.get("media") for t in state.completed]
-        project.add_episode(goal, outputs, episode)
+        project.add_episode(goal, artifact_paths or
+                            [t.result.get("output") or t.result.get("media")
+                             for t in state.completed], episode)
         project.save()
         if verbose:
             print(f"  📁 项目档案已更新：{project.describe()}")
     _emit({"type": "run.done", "phase": state.phase,
            "n_reused": sum(1 for t in state.completed if t.result.get("reused")),
            "project": project.summary() if project is not None else None,
+           "artifacts": artifact_paths,
            "completed": [{"action": t.action, "task_id": t.task_id,
                           "score": t.result.get("_score"),
                           "refine_history": list(t.refine_history)} for t in state.completed],
