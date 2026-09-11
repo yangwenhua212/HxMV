@@ -60,7 +60,7 @@ def _encoded_frame(image: str, w: int | None, hgt: int | None, outdir: str) -> s
     tmp = os.path.join(outdir, f"_basetmp_{w}x{hgt}_{stem}.mp4")
     rc, _ = probe._run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-loop", "1",
                         "-i", image, "-frames:v", "1", "-vf", f"scale={w}:{hgt},format=yuv420p",
-                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", tmp])
+                        *probe.encoder_args(26), tmp])
     if rc != 0:
         return None
     rc, _ = probe._run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -191,9 +191,8 @@ class ZhipuVideoProvider(VideoProvider):
             if lead > 0.05:
                 tmp = path.replace(".mp4", "_trim.mp4")
                 rc, _ = probe._run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                                    "-ss", f"{lead}", "-i", path, "-c:v", "libx264",
-                                    "-preset", "veryfast", "-crf", "26", "-c:a", "aac",
-                                    "-pix_fmt", "yuv420p", tmp])
+                                    "-ss", f"{lead}", "-i", path, *probe.encoder_args(26),
+                                    "-c:a", "aac", "-pix_fmt", "yuv420p", tmp])
                 if rc == 0 and os.path.isfile(tmp):
                     os.replace(tmp, path)
         return path

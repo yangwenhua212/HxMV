@@ -65,6 +65,37 @@ def _run(args: list[str], timeout: int = 120) -> tuple[int, str]:
     return p.returncode, out
 
 
+_ENCODER: tuple[str, str] | None = None
+
+
+def encoder_args(quality: int = 26) -> list[str]:
+    """可用的视频编码参数：优先 libx264（质量/体积最好），**没有就退 mpeg4**。
+
+    为什么必须有这层退让：Android/Termux 上的 ffmpeg 构建不一定编进 libx264，
+    而"手机上直接跑不起来"比"编码次一点"糟糕得多。跑不了 x264 就退到 ffmpeg
+    自带的 mpeg4（任何构建都有），代价只是同样的 crf 换成 qscale。
+    `HXMV_ENCODER=mpeg4` 可强制指定（老设备/异常构建上排查用）。
+    """
+    global _ENCODER
+    forced = os.environ.get("HXMV_ENCODER", "").strip().lower()
+    if _ENCODER is None and forced in ("libx264", "x264", "mpeg4"):
+        _ENCODER = ("libx264", "x264") if forced in ("libx264", "x264") else ("mpeg4", "mpeg4")
+    if _ENCODER is None:
+        rc, out = _run(["ffmpeg", "-hide_banner", "-encoders"])
+        _ENCODER = ("libx264", "x264") if rc == 0 and "libx264" in out else ("mpeg4", "mpeg4")
+    name, _ = _ENCODER
+    if name == "libx264":
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(quality)]
+    # mpeg4 不吃 -crf：按 crf 粗略折算 qscale（1 最好 / 31 最差）
+    q = max(2, min(12, int(quality / 4)))
+    return ["-c:v", "mpeg4", "-qscale:v", str(q)]
+
+
+def encoder_name() -> str:
+    encoder_args()
+    return _ENCODER[0] if _ENCODER else "unknown"
+
+
 def is_media_file(path: str | None) -> bool:
     """result 里的 media/output 是不是**真文件**（mock 世界给的是占位字符串，不落盘）。"""
     return bool(path) and os.path.isfile(str(path))

@@ -166,7 +166,7 @@ class LocalRenderProvider(VideoProvider):
         self._ff(["-loop", "1", "-i", ref, "-frames:v", "1",
                   "-vf", (f"zoompan=z='{MOTION_ZOOM}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                           f":d=1:s={w}x{hgt},format=yuv420p"),
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", tmp])
+                  *probe.encoder_args(26), tmp])
         self._ff(["-i", tmp, "-frames:v", "1", path])
         os.remove(tmp)
         return path
@@ -260,7 +260,7 @@ class LocalRenderProvider(VideoProvider):
             "-loop", "1", "-i", source,
             "-f", "lavfi", "-i", f"sine=frequency={freq}:duration={duration}",
             "-vf", ",".join(chain), "-t", f"{duration}", "-r", str(fps),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
+            *probe.encoder_args(26), "-pix_fmt", "yuv420p",
             "-af", f"volume={BASE_AUDIO_DB + gain_db:.1f}dB", "-c:a", "aac", "-shortest", path,
         ])
         self._slot_bind(task, path, fp)
@@ -361,7 +361,7 @@ class LocalRenderProvider(VideoProvider):
         args += ["-filter_complex", graph, "-map", "[vout]"]
         if has_audio:
             args += ["-map", "[aout]", "-c:a", "aac"]
-        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p", out]
+        args += [*probe.encoder_args(24), "-pix_fmt", "yuv420p", out]
         self._ff(args)
         cont = probe.probe_container(out) or {}
         result = {"output": out, "shots": list(keys), "files": paths,

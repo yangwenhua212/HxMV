@@ -177,6 +177,10 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 
 ## 设计文档
 
+- [docs/DESIGN.md](docs/DESIGN.md) 内核设计 · [docs/PROVIDERS.md](docs/PROVIDERS.md) 接新视频服务
+- [docs/MOBILE.md](docs/MOBILE.md) **手机上跑 HxMV**（Termux / 遥控器 / APK 三种形态）
+- 一键装（手机 Termux）：`bash <(curl -sL https://raw.githubusercontent.com/yangwenhua212/HxMV/main/scripts/install-termux.sh)`
+
 架构图、判据阈值标定与决策说明见 [DESIGN.md](DESIGN.md)。
 
 ## License
