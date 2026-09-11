@@ -41,6 +41,7 @@ from .core.loop import run
 
 RUNS_DIR = os.path.expanduser("~/.hxmv/runs")
 DL_DIR = os.environ.get("HXMV_DL_DIR", os.path.expanduser("~/.hxmv/dl"))
+HOOKS_DIR = os.environ.get("HXMV_HOOKS_DIR", os.path.expanduser("~/.hxmv/hooks"))
 STARTED_AT = time.time()
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html")
 
@@ -418,6 +419,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         u = urlparse(self.path)
+        if u.path.startswith("/hook/"):
+            # 诊断/回调上报口：CI（比如 GitHub Actions）把结果 POST 回来，落到 ~/.hxmv/hooks/
+            # 公开可写但做了硬限制（只允许白名单文件名 + 每次最多 64KB + 只追加），
+            # 用途单一：出包/部署链路的"回传眼镜"，方便在没有日志权限时排障。
+            name = u.path[len("/hook/"):]
+            if (not name or "/" in name or "\\" in name or name.startswith(".")
+                    or not all(c.isalnum() or c in "-._" for c in name)):
+                self._send_err(400, "名字不合法")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 65536:
+                self._send_err(413, "上报体大小不合法")
+                return
+            body = self.rfile.read(length)
+            os.makedirs(HOOKS_DIR, exist_ok=True)
+            line = json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                               "from": self.headers.get("User-Agent", ""),
+                               "data": body.decode("utf-8", "ignore")}, ensure_ascii=False)
+            with open(os.path.join(HOOKS_DIR, name + ".jsonl"), "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            self._send_json({"ok": True})
+            return
         if u.path != "/api/run":
             self._send_err(404, f"未知路径: {u.path}")
             return
