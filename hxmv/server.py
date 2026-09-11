@@ -12,6 +12,7 @@
     GET  /api/brain              → 大脑条目（只读展示）
     GET  /api/health             → **自检 + 能力**（HxSync 等客户端用来"发现实例"）
     GET  /api/artifact?run_id=&name= → 取产物文件（成片/镜头/参考图）
+    GET  /dl/<文件名>            → 分发包下载（客户端安装包等，放 ~/.hxmv/dl/，公开不带 token）
 
 客户端友好（HxSync）：
     · /api/health 可被客户端扫描发现（本地 127.0.0.1 或远端域名都行）
@@ -27,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -38,6 +40,7 @@ from .core.brain import Brain
 from .core.loop import run
 
 RUNS_DIR = os.path.expanduser("~/.hxmv/runs")
+DL_DIR = os.environ.get("HXMV_DL_DIR", os.path.expanduser("~/.hxmv/dl"))
 STARTED_AT = time.time()
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html")
 
@@ -253,6 +256,41 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             except OSError:
                 self._send_err(500, f"面板文件缺失: {WEB_HTML}")
+            return
+
+        if p.startswith("/dl/"):
+            # 分发包（客户端安装包等）：放固定目录、按文件名白名单取，防穿越。
+            # 走 nginx 前面时不需要 token——这是公开的安装包，不是实例数据。
+            name = p[len("/dl/"):]
+            if (not name or "/" in name or "\\" in name or name.startswith(".")
+                    or not all(c.isalnum() or c in "-._" for c in name)):
+                self._send_err(400, "文件名不合法")
+                return
+            path = os.path.join(DL_DIR, name)
+            if not os.path.isfile(path):
+                self._send_err(404, f"没有这个分发包: {name}")
+                return
+            ctype = ("application/vnd.android.package-archive" if name.endswith(".apk")
+                     else "application/octet-stream")
+            size = os.path.getsize(path)
+            start = 0                      # 支持断点续传（手机下大包常断）
+            m = re.match(r"bytes=(\d+)-", self.headers.get("Range", ""))
+            if m:
+                start = min(int(m.group(1)), max(size - 1, 0))
+            self.send_response(206 if m else 200)
+            self.send_header("Content-Type", ctype)
+            if m:
+                self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+            self.send_header("Content-Length", str(size - start))
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.end_headers()
+            with open(path, "rb") as f:
+                f.seek(start)
+                while True:
+                    chunk = f.read(1 << 16)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
             return
 
         if not self._authed():

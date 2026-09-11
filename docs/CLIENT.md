@@ -29,6 +29,7 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 | `/api/runs` | GET | 制片历史摘要列表 |
 | `/api/brain` | GET | 大脑条目（做过什么、学到什么） |
 | `/api/artifact?run_id=&name=` | GET | 取产物字节（mp4/png，`Content-Disposition: inline`） |
+| `/dl/<文件名>` | GET | 分发包下载（客户端安装包等，放 `~/.hxmv/dl/`；公开、免 token、支持断点续传） |
 
 **认证**：`X-Hxmv-Token` 头（或 `?token=`，SSE 只能用 query）。健康检查也需要 token（除非服务端没设 `HXMV_WEB_TOKEN`）。
 
