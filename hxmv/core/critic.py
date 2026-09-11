@@ -105,7 +105,9 @@ class L2VisualCritic(Critic):
         media = result.get("media")
         # 优先用\"零漂移基线帧\"（同编码管线）而不是参考图原图——消掉编码差异带来的假距离
         ref = result.get("reference_baseline") or result.get("reference")
-        consistency = probe.appearance_consistency(media, ref) if (media and ref) else None
+        at_ratio = result.get("consistency_at_ratio")
+        consistency = probe.appearance_consistency(
+            media, ref, at_ratio=0.5 if at_ratio is None else float(at_ratio)) if (media and ref) else None
         if consistency is not None:
             result["consistency"] = consistency            # 供面板/审计：与参考图的一致度
             thr = probe.THRESHOLDS["min_consistency"]

@@ -51,6 +51,8 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/brain.py` | **大脑**：持久记忆，自动注入/自动回写，会遗忘（详见下） |
 | `core/project.py` | **项目档案（v0.5）**：跨 run 记住风格/角色/场景/已生成画面与分集——续做不重画 |
 | `providers/local_render.py` | **真渲染 provider（v0.4）**：用系统 FFmpeg 真出片（资产/镜头/成片都落盘），参数真的决定可测质量 |
+| `providers/zhipu_video.py` | **真 AI 视频（v0.6）**：智谱 CogVideoX-Flash（免费）文/图生视频，角色参考图当首帧锁角色 |
+| `core/config.py` | 本地凭据：`~/.hxmv/config.json`（权限 600），`--set-key` 一次配好，CLI 与 Web 共用 |
 | `providers/` | Provider 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
 | `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板 |
 
@@ -127,6 +129,11 @@ python3 -m hxmv --provider local --project 柯基短剧 --episode 2 \
     "第2集：柯基跑到海边看浪"          # 角色图复用，只生成本集新镜头
 python3 -m hxmv --list-projects        # 看有哪些项目、做到第几集
 
+# 接真实 AI 视频生成（智谱 CogVideoX-Flash，免费；支持图生视频→角色一致）
+python3 -m hxmv --set-key zhipu <你的KEY>     # 一次配好，存 ~/.hxmv/config.json（600）
+python3 -m hxmv --key-status                  # 确认
+python3 -m hxmv --provider zhipu --project 柯基短剧 --episode 1 "第1集：柯基在雪地里打滚"
+
 # 接真实生成服务（Provider 层，fake 仿真无需 key 可跑）
 HXMV_PROVIDER=fake python3 -m hxmv "雪地里的柯基"
 # HXMV_PROVIDER=kling HXMV_KLING_KEY=sk-xxx python3 -m hxmv "..."   # 真实服务
@@ -164,8 +171,9 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - **V0.3** ✅ Web 控制台：事件化内核 + stdlib daemon + 单文件面板 + 产物取回
 - **V0.4** ✅ 真产物 + 真眼睛：FFmpeg 真渲染 + ffprobe 真测量 + 真像素一致性 + 参数学到的经验起手
 - **V0.5** ✅ 项目档案：风格/角色/已生成画面跨 run 记忆 + 剧情身份复用（续做不重画），Web 端可指定项目
-- **V0.6** 📋 资产一致性深化（角色参考图版本管理、跨镜头锁脸、视觉模型抽帧比对）、checkpoint 人工审批点（高成本高主观产物必须有人把关，勿做纯全自动）
-- **V0.7** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
+- **V0.6** ✅ 真 AI 视频接入：智谱 CogVideoX-Flash（免费）文/图生视频 + 角色参考图当首帧 + Key 本地配置（`--set-key`）+ 仿真端点自测
+- **V0.7** 📋 资产一致性深化（角色参考图版本管理、跨镜头锁脸、视觉模型抽帧比对）、checkpoint 人工审批点（高成本高主观产物必须有人把关）
+- **V0.8** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
 ## 设计文档
 

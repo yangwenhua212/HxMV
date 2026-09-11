@@ -34,7 +34,7 @@ from .state import ExecutionState, TaskStatus
 
 def banner(state: ExecutionState) -> None:
     print("\n" + "═" * 52)
-    print(f"  HxMV 自主控制闭环  v0.5 · 真产物 + 真眼睛 + 项目档案")
+    print(f"  HxMV 自主控制闭环  v0.6 · 真 AI 视频 + 项目档案")
     print(f"  目标：{state.goal}")
     print("═" * 52)
 

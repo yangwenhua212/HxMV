@@ -23,14 +23,35 @@ def main() -> int:
     ap.add_argument("--fresh", action="store_true", help="清空大脑后从零跑（演示学习曲线用）")
     ap.add_argument("--brain", default=None, help="大脑文件路径（默认 ~/.hxmv/brain.json）")
     ap.add_argument("--provider", default=None,
-                    choices=["mock", "local", "fake", "kling"],
-                    help="生成器：mock=模拟世界（默认） local=FFmpeg 真渲染 fake=线上仿真 kling=可灵 API")
+                    choices=["mock", "local", "fake", "zhipu", "kling"],
+                    help="生成器：mock=模拟世界（默认） local=FFmpeg 真渲染 "
+                         "zhipu=智谱 CogVideoX-Flash（真 AI 视频，免费） fake=线上仿真 kling=可灵 API")
+    ap.add_argument("--set-key", nargs=2, default=None, metavar=("PROVIDER", "KEY"),
+                    help="写入 API Key 到 ~/.hxmv/config.json（例：--set-key zhipu <你的key>）")
+    ap.add_argument("--key-status", action="store_true", help="查看各 provider 的 Key 是否已配置")
     ap.add_argument("--out", default=None, help="产物目录（local provider 用，默认 ~/.hxmv/artifacts/<时间戳>）")
     ap.add_argument("--project", default=None, help="项目名：跨 run 记住风格/角色/已生成画面，续做时不重新生成")
     ap.add_argument("--episode", type=int, default=None, help="第几集（默认自动递增）")
     ap.add_argument("--style", default=None, help="项目风格（首次创建项目时用，默认 cinematic）")
     ap.add_argument("--list-projects", action="store_true", help="列出已有项目档案")
     args = ap.parse_args()
+
+    from .core import config
+    if args.set_key:
+        provider, key = args.set_key[0].strip().lower(), args.set_key[1].strip()
+        if not key:
+            print("⚠ Key 不能为空")
+            return 1
+        shown = config.set_api_key(provider, key)
+        print(f"✅ 已保存 {provider} 的 API Key：{shown}")
+        print(f"   位置：{config.CONFIG_PATH}（权限 600，只本机可读）")
+        return 0
+    if args.key_status:
+        print(f"配置文件：{config.CONFIG_PATH}")
+        for prov in ("zhipu", "kling"):
+            k = config.api_key(prov)
+            print(f"  {prov:8s} {'✅ 已配置 ' + config.mask(k) if k else '❌ 未配置'}")
+        return 0
 
     if args.list_projects:
         from .core.project import Project, PROJECTS_DIR

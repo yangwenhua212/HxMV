@@ -37,7 +37,7 @@ WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "inde
 # （header X-Hxmv-Token 或 query ?token=，EventSource 只能用 query）
 HXMV_WEB_TOKEN = os.environ.get("HXMV_WEB_TOKEN", "")
 
-PROVIDERS = {"mock": "", "fake": "fake", "local": "local", "kling": "kling"}
+PROVIDERS = {"mock": "", "fake": "fake", "local": "local", "zhipu": "zhipu", "kling": "kling"}
 
 
 class RunRecorder:
@@ -180,7 +180,7 @@ def _scan_runs() -> list[dict]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HxMV/0.5"
+    server_version = "HxMV/0.6"
 
     # ---- helpers ----
     def _send_json(self, obj, code: int = 200) -> None:

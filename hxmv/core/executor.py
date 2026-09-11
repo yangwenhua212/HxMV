@@ -192,6 +192,9 @@ def make_executor(project=None, episode: int | None = None):
             if name == "fake":
                 from ..providers.fake_api import FakeApiProvider
                 return ProviderExecutor(FakeApiProvider(project=project))
+            if name in ("zhipu", "bigmodel", "cogvideo"):
+                from ..providers.zhipu_video import ZhipuVideoProvider
+                return ProviderExecutor(ZhipuVideoProvider(project=project))
             if name in ("kling", "klingai"):
                 from ..providers.kling_example import KlingStyleProvider
                 return ProviderExecutor(KlingStyleProvider(project=project))
