@@ -37,10 +37,11 @@ class MockPlanner(Planner):
     初始 reference_strength 自动抬高——同样的活第二次干得更好。
     """
 
-    def __init__(self, brain=None):
+    def __init__(self, brain=None, project=None):
         self._queue: list[Task] = []
         self._built = False
         self._brain = brain
+        self.project = project
 
     def _learnt_strength(self, failure_key: str, base: float) -> float:
         """从大脑读取同类失败经验：**被验证的次数**越多，起手参数越稳。
@@ -54,7 +55,7 @@ class MockPlanner(Planner):
         for e in self._brain.entries:
             if e.kind == "LESSON" and e.meta.get("failure") == failure_key:
                 hits += int(e.meta.get("times", 1))
-        return min(1.0, base + 0.05 * hits)  # 每次验证 +0.05
+        return min(1.0, round(base + 0.05 * hits, 3))  # 每次验证 +0.05（必须 round：浮点会写出 0.6000000000000001）
 
     def _learnt_params(self) -> tuple[dict, list[str]]:
         """从大脑里学到"这个生成器的脾气"，直接按**验证过的参数**起手。
@@ -77,13 +78,34 @@ class MockPlanner(Planner):
                 notes.append(label)
         return inp, notes
 
+    def _apply_archive(self, inp: dict, cons: dict) -> str | None:
+        """把项目档案里\"这个镜头上次用的参数\"盖到当前任务上（返回命中的镜头名，无命中返回 None）。"""
+        if not self.project:
+            return None
+        hit = self.project.best_for(inp.get("prompt"), cons.get("character"),
+                                    cons.get("scene"), cons.get("style"))
+        if not hit:
+            return None
+        ti, tc = hit.get("task_input") or {}, hit.get("task_constraints") or {}
+        for k in ("duration", "seed", "resolution", "fps", "audio_gain_db", "trim_black"):
+            if ti.get(k) is not None:
+                inp[k] = ti[k]
+        for k in ("reference_strength", "scene_strength", "motion_scale"):
+            if tc.get(k) is not None:
+                cons[k] = tc[k]
+        return str(inp.get("prompt"))[:14]
+
     def next_task(self, state: ExecutionState) -> Task | None:
         if not self._built:
             base = _first_scene_prompt(state.goal)
             s_char = self._learnt_strength("character_inconsistency", 0.4)
             s_scene = self._learnt_strength("scene_inconsistency", 0.4)
             seeded, notes = self._learnt_params()
-            shot_constraints = {"character": "cat", "style": "cinematic", "scene": "s01",
+            # 项目档案优先：角色/场景/风格必须沿用档案里的，否则每次跑都在"新建角色"
+            char_key = next(iter(self.project.characters), "cat") if self.project else "cat"
+            scene_key = next(iter(self.project.scenes), "s01") if self.project else "s01"
+            style = self.project.style if self.project else "cinematic"
+            shot_constraints = {"character": char_key, "style": style, "scene": scene_key,
                                 "continuity": True, "reference_strength": s_char,
                                 "scene_strength": s_scene}
             if s_char > 0.4 or s_scene > 0.4 or notes:
@@ -93,22 +115,29 @@ class MockPlanner(Planner):
             shot2 = {"prompt": base + "，特写", "duration": 5, "seed": 202}
             shot1.update(seeded)
             shot2.update(seeded)
+            cons1, cons2 = dict(shot_constraints), dict(shot_constraints)
+            # 项目档案（具体）优先于大脑泛化经验：这一集这个镜头做过 → 沿用上次那版参数，
+            # 指纹随即命中 → 直接复用旧画面，一张都不重画。
+            hits = [h for h in (self._apply_archive(shot1, cons1),
+                                self._apply_archive(shot2, cons2)) if h]
+            if hits:
+                state.log(f"♻ 项目档案命中：{'、'.join(hits)}（本集镜头做过 → 沿用旧参数，不重新生成画面）")
             self._queue = [
                 Task(ACTION_STORYBOARD,
                      input={"goal": state.goal},
                      quality={"min_score": 0.80}),
                 Task(ACTION_GENERATE_CHARACTER,
-                     input={"prompt": f"主角：小猫（{base} 的主角）"},
-                     constraints={"style": "cinematic", "asset_key": "cat"}),
+                     input={"prompt": f"主角：（{base} 的主角）"},
+                     constraints={"style": style, "asset_key": char_key}),
                 Task(ACTION_GENERATE_SCENE,
                      input={"prompt": base},
-                     constraints={"style": "cinematic", "scene_key": "s01"}),
+                     constraints={"style": style, "scene_key": scene_key}),
                 Task(ACTION_GENERATE_SHOT,
                      input=shot1,
-                     constraints=dict(shot_constraints)),
+                     constraints=cons1),
                 Task(ACTION_GENERATE_SHOT,
                      input=shot2,
-                     constraints=dict(shot_constraints)),
+                     constraints=cons2),
                 Task(ACTION_COMPOSE,
                      input={"shots": ["shot#1", "shot#2"], "output": "final.mp4"},
                      quality={"min_score": 0.85}),
@@ -130,14 +159,17 @@ class LLMPlanner(Planner):
         "不要输出任何 JSON 以外的文字。动作全部大写。"
     )
 
-    def __init__(self, brain=None):
+    def __init__(self, brain=None, project=None):
         self._brain = brain
+        self.project = project
 
     def next_task(self, state: ExecutionState) -> Task | None:
         if state.phase == "PLAN" and not state.tasks:
             try:
                 memory_block = self._brain.inject(query=state.goal) if self._brain else ""
-                system = self.SYSTEM + ("\n" + memory_block if memory_block else "")
+                project_block = self.project.inject() if self.project else ""
+                blocks = "\n\n".join(b for b in (project_block, memory_block) if b)
+                system = self.SYSTEM + ("\n" + blocks if blocks else "")
                 text = llm.chat([
                     {"role": "system", "content": system},
                     {"role": "user", "content": state.goal},
@@ -155,12 +187,16 @@ class LLMPlanner(Planner):
         return None
 
 
-def make_planner(state: ExecutionState, brain=None) -> Planner:
-    """工厂：能接 LLM 就接，失败/未配置落 MockPlanner（可跑性是底线）。"""
+def make_planner(state: ExecutionState, brain=None, project=None) -> Planner:
+    """工厂：能接 LLM 就接，失败/未配置落 MockPlanner（可跑性是底线）。
+
+    project：项目档案——两种规划都必须**沿用档案里的角色/场景/风格**，
+    否则每次跑都会"新建角色"，前一次的画面就白做了。
+    """
     if llm.llm_available():
-        p = LLMPlanner(brain)
+        p = LLMPlanner(brain, project)
         probe = p.next_task(state)
         if probe is not None:
             return p
         state.log("⚠ LLM 规划失败，降级 MockPlanner")
-    return MockPlanner(brain)
+    return MockPlanner(brain, project)

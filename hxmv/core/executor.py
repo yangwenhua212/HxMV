@@ -39,11 +39,23 @@ class Executor:
 
 
 class MockVideoExecutor(Executor):
-    """确定性 mock 执行器：同一 (task, attempt) 永远产出同一缺陷集。"""
+    """确定性 mock 执行器：同一 (task, attempt) 永远产出同一缺陷集。
+
+    project 传入时同样走**指纹复用**：同一个画面参数不重复"生成"（mock 世界里
+    表现为不重新抽缺陷），演示"接着做、不重新出画面"的行为。
+    """
+
+    def __init__(self, project=None):
+        self.project = project
 
     def _rng(self, task: Task) -> random.Random:
         h = hashlib.md5(f"{task.task_id}:{task.retry_policy.get('attempts', 0)}:{task.input}".encode()).hexdigest()
         return random.Random(int(h[:8], 16))
+
+    def _fp(self, task: Task) -> str:
+        from .project import fingerprint
+        return fingerprint({**task.input, **task.constraints,
+                            "prompt": task.input.get("prompt") or task.input.get("goal")})
 
     def _physics_defects(self, rng: random.Random, task: Task) -> list[str]:
         """L1 物理缺陷：**必须与参数挂钩**，否则 Refiner 的调参永远修不好它
@@ -104,15 +116,25 @@ class MockVideoExecutor(Executor):
                     "cost_units": cost}
 
         if task.action == ACTION_GENERATE_SHOT:
+            fp = self._fp(task)
+            hit = self.project.shot(fp) if self.project else None
+            if hit:      # 档案里已有同参数的画面 → 直接复用，不重新"生成"（也不花钱）
+                saved = dict(hit["result"])
+                saved.update({"reused": True, "fingerprint": fp, "cost_units": 0.0})
+                return saved
             defects = (self._physics_defects(rng, task)
                        + self._consistency_defects(rng, task)
                        + self._semantic_defects(rng, task))
-            return {
+            result = {
                 "media": "mock_video.mp4", "duration": task.input.get("duration", 5),
-                "fps": 24, "defects": defects,
+                "fps": 24, "defects": defects, "reused": False, "fingerprint": fp,
                 "params": {"seed": task.input.get("seed"), "reference_strength": task.constraints.get("reference_strength")},
                 "cost_units": cost,
             }
+            if self.project:
+                self.project.register_shot(fp, result["media"], result=result,
+                                           prompt=task.input.get("prompt"))
+            return result
 
         if task.action == ACTION_COMPOSE:
             return {"output": task.input.get("output", "final.mp4"),
@@ -155,21 +177,25 @@ class ProviderExecutor(Executor):
         return self.provider.generate(api_task)
 
 
-def make_executor():
-    """工厂：HXMV_PROVIDER=local/fake/kling → ProviderExecutor；否则/失败落 Mock。"""
+def make_executor(project=None, episode: int | None = None):
+    """工厂：HXMV_PROVIDER=local/fake/kling → ProviderExecutor；否则/失败落 Mock。
+
+    project = 项目档案（跨 run 记忆风格/角色/已生成画面）：local provider 会先查档，
+    命中就复用已有画面，不重新生成。
+    """
     name = os.environ.get("HXMV_PROVIDER", "").lower()
     if name:
         try:
             if name == "local":
                 from ..providers.local_render import LocalRenderProvider
-                return ProviderExecutor(LocalRenderProvider())
+                return ProviderExecutor(LocalRenderProvider(project=project))
             if name == "fake":
                 from ..providers.fake_api import FakeApiProvider
-                return ProviderExecutor(FakeApiProvider())
+                return ProviderExecutor(FakeApiProvider(project=project))
             if name in ("kling", "klingai"):
                 from ..providers.kling_example import KlingStyleProvider
-                return ProviderExecutor(KlingStyleProvider())
+                return ProviderExecutor(KlingStyleProvider(project=project))
             raise ProviderError(f"未知 provider: {name}", retryable=False)
         except ProviderError as e:
             print(f"⚠ {e} → 降级 MockVideoExecutor")
-    return MockVideoExecutor()
+    return MockVideoExecutor(project=project)

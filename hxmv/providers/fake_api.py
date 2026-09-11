@@ -21,9 +21,10 @@ class FakeApiProvider(VideoProvider):
     action_map = {"GENERATE_SHOT": "text2video", "GENERATE_SCENE": "image",
                   "GENERATE_CHARACTER": "image"}
 
-    def __init__(self, seed: int = 7):
+    def __init__(self, seed: int = 7, project=None):
         self._rng = random.Random(seed)
         self._submitted = 0
+        self.project = project
 
     def generate(self, task) -> dict:
         time.sleep(0.2)  # 模拟网络往返

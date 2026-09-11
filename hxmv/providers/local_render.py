@@ -32,6 +32,7 @@ import time
 
 from ..media import probe
 from .base import ProviderError, VideoProvider
+from ..core.project import Project, fingerprint
 
 # 低端生成器基线（低于 L1 阈值 → 首轮必然被量出真实缺陷）
 BASE_RESOLUTION = (640, 360)
@@ -60,17 +61,23 @@ class LocalRenderProvider(VideoProvider):
     action_map = {"GENERATE_SHOT": "render", "GENERATE_SCENE": "render",
                   "GENERATE_CHARACTER": "render", "COMPOSE": "concat"}
 
-    def __init__(self, outdir: str | None = None):
+    def __init__(self, outdir: str | None = None, project: Project | None = None):
         if not probe.has_ffmpeg():
             raise ProviderError("系统缺少 ffmpeg/ffprobe，无法真渲染", retryable=False)
-        self.outdir = outdir or os.environ.get("HXMV_ARTIFACTS") or \
-            os.path.expanduser(f"~/.hxmv/artifacts/{time.strftime('%Y%m%d-%H%M%S')}")
+        self.project = project
+        self.outdir = outdir or os.environ.get("HXMV_ARTIFACTS") or (
+            os.path.join(project.dir, "artifacts") if project else
+            os.path.expanduser(f"~/.hxmv/artifacts/{time.strftime('%Y%m%d-%H%M%S')}"))
         os.makedirs(self.outdir, exist_ok=True)
         self._assets: dict[str, str] = {}   # asset_key/scene_key → 参考图路径
         self._shots: dict[str, str] = {}    # shot#1 / task_id → 镜头文件
         self._order: list[str] = []         # COMPOSE 兜底用：按镜头位的最新版本
         self._shot_slots: list[str] = []    # 镜头位 → task_id（重试不新增镜头位）
         self._slot_of: dict[str, int] = {}  # task_id → 镜头位序号
+        self._shot_fp: dict[int, str] = {}  # 镜头位 → 画面指纹（COMPOSE 复用的依据）
+        self._reused_assets: list[str] = []
+        self._reused_shots = 0
+        self.episode: int | None = None
 
     # ---------- 工具 ----------
     def _rng(self, task, salt: str = "", stable: bool = False) -> random.Random:
@@ -92,15 +99,24 @@ class LocalRenderProvider(VideoProvider):
             raise ProviderError(f"ffmpeg 渲染失败: {out.strip()[:200]}", retryable=True)
 
     # ---------- 资产：角色 / 场景参考图（真 PNG） ----------
-    def _render_asset(self, task, key: str) -> str:
+    def _render_asset(self, task, key: str, kind: str = "character") -> str:
         """参考图 = 有**真实纹理细节**的确定性图案 + 该 key 的专属色调。
 
         用 testsrc2 而不是纯渐变：纯渐变太\"平\"，一平移每帧像素几乎不变，
         静止检测（正确地）会把它判成 frozen——实测踩过这个坑。
         有细节的画面才像真实素材：平移/漂移都能在像素上量出来。
+
+        **项目档案优先**：这片子已经有这个角色/场景的参考图 → 直接复用同一张
+        （复用的不只是图，是\"这个角色长这样\"的设定），不重新生成。
         """
         if key in self._assets:
             return self._assets[key]
+        if self.project:
+            hit = self.project.asset(kind, key)
+            if hit:
+                self._assets[key] = hit["path"]
+                self._reused_assets.append(f"{kind}:{key}")
+                return hit["path"]
         h = int(hashlib.md5(key.encode()).hexdigest()[:6], 16)
         c0, c1 = _PALETTE[h % len(_PALETTE)]
         w, hgt = BASE_RESOLUTION
@@ -121,14 +137,16 @@ class LocalRenderProvider(VideoProvider):
             "-map", "[out]", "-frames:v", "1", path,
         ])
         self._assets[key] = path
+        if self.project:
+            self.project.register_asset(kind, key, path, name=key, style=self.project.style)
         return path
 
     def _reference_for(self, task) -> tuple[str | None, str | None]:
         """镜头用到的参考图：角色优先，其次场景。"""
-        for field, kind in (("character", "character"), ("scene", "scene")):
+        for field in ("character", "scene"):
             key = task.constraints.get(field)
             if key:
-                return self._render_asset(task, str(key)), kind
+                return self._render_asset(task, str(key), field), field
         return None, None
 
     def _baseline_frame(self, ref: str, w: int, hgt: int) -> str:
@@ -138,10 +156,12 @@ class LocalRenderProvider(VideoProvider):
         （高频细节被压掉），实测\"零漂移\"也能差出 0.12——那 0.12 会被误算成\"不一致\"。
         走同一条管线，量出来的距离才真正反映漂移本身。
         """
-        path = os.path.join(self.outdir, f"base_{w}x{hgt}_{os.path.basename(ref)}.png")
+        path = os.path.join(self.outdir,
+                            f"base_{w}x{hgt}_{os.path.splitext(os.path.basename(ref))[0]}.png")
         if os.path.exists(path):
             return path
-        tmp = os.path.join(self.outdir, f"_basetmp_{w}x{hgt}_{os.path.basename(ref)}.mp4")
+        tmp = os.path.join(self.outdir,
+                           f"_basetmp_{w}x{hgt}_{os.path.splitext(os.path.basename(ref))[0]}.mp4")
         # 居中裁切（x/y 都取正中）= 运镜在 50% 时刻的画面几何，与一致性采样点对齐
         self._ff(["-loop", "1", "-i", ref, "-frames:v", "1",
                   "-vf", (f"zoompan=z='{MOTION_ZOOM}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
@@ -186,6 +206,27 @@ class LocalRenderProvider(VideoProvider):
         ref, kind = self._reference_for(task)
         if ref is None:
             raise ProviderError("镜头缺少参考资产（character/scene）", retryable=False)
+
+        # ---- 画面指纹：档案里已有同参数的画面 → 直接复用文件，**跳过生成** ----
+        fp = fingerprint({
+            "prompt": task.input.get("prompt"), "duration": duration,
+            "resolution": inp.get("resolution"), "fps": fps, "seed": task.input.get("seed"),
+            "reference_strength": strength, "motion_scale": motion, "audio_gain_db": gain_db,
+            "trim_black": bool(inp.get("trim_black")),
+            "character": cons.get("character"), "scene": cons.get("scene"),
+            "style": cons.get("style") or (self.project.style if self.project else None),
+        })
+        if self.project:
+            hit = self.project.shot(fp)
+            if hit:
+                self._reused_shots += 1
+                saved = dict(hit["result"])
+                saved["reused"] = True
+                saved["fingerprint"] = fp
+                saved["cost_units"] = 0.0
+                self._slot_bind(task, saved.get("media"), fp)
+                return saved
+
         source = self._drift_image(ref, strength)   # 强度越低 → 漂移越大 → L2 能真的量到
 
         # 运镜：**平移为主 + 固定小推镜**（不是从零开始的余弦推镜——那种起步 1 秒内几乎
@@ -222,18 +263,8 @@ class LocalRenderProvider(VideoProvider):
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
             "-af", f"volume={BASE_AUDIO_DB + gain_db:.1f}dB", "-c:a", "aac", "-shortest", path,
         ])
-        # 同一个 task_id 的重试占**同一个镜头位**：成片要拼\"每个镜头位当前最新的那一版\"，
-        # 否则会把最早那版废片拼进去（实测踩过：重试产生 shot#3/#4，成片却拿 shot#1）。
-        if task.task_id in self._slot_of:
-            slot = self._slot_of[task.task_id]
-        else:
-            slot = len(self._shot_slots) + 1
-            self._slot_of[task.task_id] = slot
-            self._shot_slots.append(task.task_id)
-        self._shots[f"shot#{slot}"] = path
-        self._shots[task.task_id] = path
-        self._order = [self._shots[t] for t in self._shot_slots]
-        return {
+        self._slot_bind(task, path, fp)
+        result = {
             "media": path, "reference": ref, "reference_kind": kind,
             "reference_baseline": self._baseline_frame(ref, w, hgt),
             "duration": duration, "fps": fps, "resolution": f"{w}x{hgt}",
@@ -241,8 +272,44 @@ class LocalRenderProvider(VideoProvider):
                        "reference_strength": strength, "motion_scale": motion,
                        "audio_gain_db": gain_db, "black_fade": fade,
                        "trim_black": bool(task.input.get("trim_black"))},
+            "reused": False, "fingerprint": fp,
             "cost_units": self.estimate_cost(task.action),
         }
+        if self.project:      # 落档：下一次同参数直接复用这一版画面
+            self.project.register_shot(
+                fp, path, episode=self.episode,
+                result={k: v for k, v in result.items() if k != "cost_units"},
+                params=result["params"], prompt=task.input.get("prompt"),
+                task_input={k: inp.get(k) for k in ("prompt", "duration", "seed", "resolution",
+                                                    "fps", "audio_gain_db", "trim_black")},
+                task_constraints={k: cons.get(k) for k in ("character", "scene", "style",
+                                                           "reference_strength", "scene_strength",
+                                                           "motion_scale")})
+        return result
+
+    def _slot_bind(self, task, path: str | None = None, fp: str | None = None) -> None:
+        """同一个 task_id 的重试占**同一个镜头位**：成片要拼"每个镜头位当前最新的那一版"，
+        否则会把最早那版废片拼进去（实测踩过：重试产生 shot#3/#4，成片却拿 shot#1）。"""
+        if task.task_id in self._slot_of:
+            slot = self._slot_of[task.task_id]
+        else:
+            slot = len(self._shot_slots) + 1
+            self._slot_of[task.task_id] = slot
+            self._shot_slots.append(task.task_id)
+        if path:
+            self._shots[task.task_id] = path
+            self._shots[f"shot#{slot}"] = path
+        if fp:
+            self._shot_fp[slot] = fp
+        self._order = [self._shots[t] for t in self._shot_slots if t in self._shots]
+
+    def set_episode(self, n: int | None) -> None:
+        """标记当前在第几集（镜头落档时带上，便于"做到哪了"）。"""
+        self.episode = n
+
+    def reuse_report(self) -> dict:
+        """本次运行复用了什么（给日志/事件用）：证明"没重新生成画面"。"""
+        return {"assets": list(self._reused_assets), "shots": self._reused_shots}
 
     # ---------- 成片：真拼接 ----------
     def _compose(self, task) -> dict:
@@ -259,6 +326,17 @@ class LocalRenderProvider(VideoProvider):
         # trim_black 在本层是**真的动作**：量出片头黑场时长，拼接时把它裁掉。
         # （黑场来自镜头自带的渐入——镜头层没修掉的，成片层还能补一刀。）
         trim = probe.leading_black_seconds(paths[0]) if task.input.get("trim_black") else 0.0
+
+        # ---- 成片指纹：镜头位画面 + 裁剪要求一致 → 复用已有成片，不重新拼接 ----
+        fp = fingerprint({"prompt": "compose|" + "|".join(
+            self._shot_fp.get(i + 1, os.path.basename(p)) for i, p in enumerate(paths)),
+            "trim_black": bool(task.input.get("trim_black"))})
+        if self.project:
+            hit = self.project.shot(fp)
+            if hit:
+                saved = dict(hit["result"])
+                saved.update({"reused": True, "fingerprint": fp, "cost_units": 0.0})
+                return saved
 
         parts, vs, as_ = [], [], []
         for i, p in enumerate(paths):
@@ -286,9 +364,18 @@ class LocalRenderProvider(VideoProvider):
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p", out]
         self._ff(args)
         cont = probe.probe_container(out) or {}
-        return {"output": out, "shots": list(keys), "files": paths,
-                "duration": cont.get("duration"), "trimmed_black": trim,
-                "cost_units": self.estimate_cost(task.action)}
+        result = {"output": out, "shots": list(keys), "files": paths,
+                  "duration": cont.get("duration"), "trimmed_black": trim,
+                  "reused": False, "fingerprint": fp,
+                  "cost_units": self.estimate_cost(task.action)}
+        if self.project:
+            self.project.register_shot(
+                fp, out, episode=self.episode,
+                result={k: v for k, v in result.items() if k != "cost_units"},
+                params={"shots": list(keys), "trim_black": bool(task.input.get("trim_black"))},
+                task_input={"prompt": "compose|" + "|".join(keys)},
+                task_constraints={})
+        return result
 
     # ---------- 入口 ----------
     def generate(self, task) -> dict:
@@ -297,8 +384,9 @@ class LocalRenderProvider(VideoProvider):
             return {"storyboard": [f"镜头 {i}: {goal[:20]}" for i in (1, 2)],
                     "cost_units": self.estimate_cost(task.action)}
         if task.action in ("GENERATE_CHARACTER", "GENERATE_SCENE"):
+            kind = "character" if task.action == "GENERATE_CHARACTER" else "scene"
             key = task.constraints.get("asset_key") or task.constraints.get("scene_key") or task.task_id
-            path = self._render_asset(task, str(key))
+            path = self._render_asset(task, str(key), kind)
             return {"asset": path, "asset_key": str(key),
                     "cost_units": self.estimate_cost(task.action)}
         if task.action == "GENERATE_SHOT":

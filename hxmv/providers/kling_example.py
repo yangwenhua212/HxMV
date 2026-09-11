@@ -36,8 +36,9 @@ class KlingStyleProvider(VideoProvider):
     name = "kling"
     action_map = ACTION_TO_ENDPOINT
 
-    def __init__(self):
+    def __init__(self, project=None):
         self.api_key = os.environ.get("HXMV_KLING_KEY", "")
+        self.project = project
         if not self.api_key:
             raise ProviderError("未配置 HXMV_KLING_KEY", retryable=False)
 

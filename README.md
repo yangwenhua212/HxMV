@@ -49,6 +49,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/refiner.py` | 按 failures→suggestions 调参重投；**优先查质量记忆里的历史成功修正** |
 | `core/controller.py` | 判定 PASS/RETRY/FAIL；PASS 时把验证有效的修正回写质量记忆 |
 | `core/brain.py` | **大脑**：持久记忆，自动注入/自动回写，会遗忘（详见下） |
+| `core/project.py` | **项目档案（v0.5）**：跨 run 记住风格/角色/场景/已生成画面与分集——续做不重画 |
 | `providers/local_render.py` | **真渲染 provider（v0.4）**：用系统 FFmpeg 真出片（资产/镜头/成片都落盘），参数真的决定可测质量 |
 | `providers/` | Provider 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
 | `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板 |
@@ -87,6 +88,24 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 **质量记忆**（跨镜头复用）：每个失败原因记录"哪个修正方向被验证成功过"，
 后续同类失败优先复用——系统越用越懂自家生成器的脾气。这是项目壁垒，不是套壳。
 
+**项目档案（v0.5）——"记得这一系列的生成"**，做动画短剧这类连续作品的关键：
+
+- `~/.hxmv/projects/<项目名>/project.json` 记住：**风格**、**角色/场景参考图**、
+  **已生成的每一个画面**（含当时用的参数）、**每一集**做到哪了
+- 续做时先读档案：角色/场景**直接复用同一张参考图**（不重新生成 → 角色长相不漂移）；
+  这一集这个镜头做过 → **直接引用旧文件，一张新画面都不生成**
+- 判据是 **画面指纹**（prompt/时长/分辨率/帧率/参考强度/种子/角色/场景/风格）+
+  **剧情身份**（同一集同一镜头）——后者优先于大脑的泛化经验，避免"参数慢慢漂、每次都重画"
+
+同一部片子连续做四次的实测（`--provider local`）：
+
+| 跑法 | 结果 | 新生成的画面 | 耗时 |
+|---|---|---|---|
+| 第 1 集（新建项目） | 全部通过，11 次尝试 | 角色图 + 场景图 + 2 镜头 + 成片 | ~57s |
+| 第 2 集（续做，新剧情） | 全部通过，8 次尝试 | **角色/场景图复用**，只有 2 个新镜头 | 36s |
+| 第 2 集再跑一次（同一集） | 全部通过，**6 次尝试全是一次过** | **0 个新文件**（指纹全命中） | **10s** |
+| 第 3 集（又一集新剧情） | 全部通过，6 次尝试 | 角色/场景图复用，2 个新镜头 | 23s |
+
 ## 快速开始
 
 ```bash
@@ -100,6 +119,13 @@ python3 -m hxmv --provider local --out /tmp/film "指定产物目录"
 # 清空大脑从零跑（看学习曲线）／指定大脑文件
 python3 -m hxmv --fresh --provider local "同一个目标"
 python3 -m hxmv --brain /path/brain.json "..."
+
+# 开一部"片子"并续做（项目档案：记住风格/角色，续做不重画已有画面）
+python3 -m hxmv --provider local --project 柯基短剧 --episode 1 --style cinematic \
+    "第1集：柯基在雪地里打滚"
+python3 -m hxmv --provider local --project 柯基短剧 --episode 2 \
+    "第2集：柯基跑到海边看浪"          # 角色图复用，只生成本集新镜头
+python3 -m hxmv --list-projects        # 看有哪些项目、做到第几集
 
 # 接真实生成服务（Provider 层，fake 仿真无需 key 可跑）
 HXMV_PROVIDER=fake python3 -m hxmv "雪地里的柯基"
@@ -137,8 +163,9 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - **V0.2** ✅ Provider 层：`VideoProvider` 接口 + 可灵接入骨架 + fake 仿真（`docs/PROVIDERS.md`）
 - **V0.3** ✅ Web 控制台：事件化内核 + stdlib daemon + 单文件面板 + 产物取回
 - **V0.4** ✅ 真产物 + 真眼睛：FFmpeg 真渲染 + ffprobe 真测量 + 真像素一致性 + 参数学到的经验起手
-- **V0.5** 📋 资产与一致性管线（角色参考图版本管理、跨镜头锁脸）、checkpoint 人工审批点（高成本高主观产物必须有人把关，勿做纯全自动）
-- **V0.6** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
+- **V0.5** ✅ 项目档案：风格/角色/已生成画面跨 run 记忆 + 剧情身份复用（续做不重画），Web 端可指定项目
+- **V0.6** 📋 资产一致性深化（角色参考图版本管理、跨镜头锁脸、视觉模型抽帧比对）、checkpoint 人工审批点（高成本高主观产物必须有人把关，勿做纯全自动）
+- **V0.7** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
 ## 设计文档
 

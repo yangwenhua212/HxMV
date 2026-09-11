@@ -96,6 +96,7 @@
           <option value="fake">线上仿真</option>
           <option value="kling">可灵 API</option>
         </select>
+        <input id="projectInput" placeholder="项目名（留空=一次性；填了会记住风格/角色，续做不重画）">​
         <button id="runBtn">开始生产</button>
         <span id="runHint"></span>
       </div>
@@ -257,11 +258,12 @@ async function submitRun() {
   const goal = $("goalInput").value.trim();
   if (!goal) { hint("先输入想做什么", true); return; }
   const provider = $("providerSel").value;
+  const project = $("projectInput").value.trim();
   $("runBtn").disabled = true; $("runBtn").textContent = "生产中…";
   try {
     const res = await (await hx("/api/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, provider })
+      body: JSON.stringify({ goal, provider, project })
     })).json();
     if (res.error) throw new Error(res.error);
     startStream(res.run_id);

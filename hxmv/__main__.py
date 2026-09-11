@@ -26,7 +26,23 @@ def main() -> int:
                     choices=["mock", "local", "fake", "kling"],
                     help="生成器：mock=模拟世界（默认） local=FFmpeg 真渲染 fake=线上仿真 kling=可灵 API")
     ap.add_argument("--out", default=None, help="产物目录（local provider 用，默认 ~/.hxmv/artifacts/<时间戳>）")
+    ap.add_argument("--project", default=None, help="项目名：跨 run 记住风格/角色/已生成画面，续做时不重新生成")
+    ap.add_argument("--episode", type=int, default=None, help="第几集（默认自动递增）")
+    ap.add_argument("--style", default=None, help="项目风格（首次创建项目时用，默认 cinematic）")
+    ap.add_argument("--list-projects", action="store_true", help="列出已有项目档案")
     args = ap.parse_args()
+
+    if args.list_projects:
+        from .core.project import Project, PROJECTS_DIR
+        rows = Project.list_all()
+        print(f"项目档案目录：{PROJECTS_DIR}")
+        if not rows:
+            print("（还没有项目——用 --project 名字 跑一次就会建档）")
+            return 0
+        for r in rows:
+            print(f"  {r['id']:18s} 风格={r['style']:12s} 角色 {r['characters']} 场景/画面 {r['shots']} "
+                  f"分集 {r['episodes']}")
+        return 0
 
     if args.fresh:
         path = args.brain or os.path.expanduser("~/.hxmv/brain.json")
@@ -39,9 +55,19 @@ def main() -> int:
         os.environ["HXMV_ARTIFACTS"] = os.path.abspath(args.out)
     brain = Brain(args.brain) if args.brain else Brain()
 
+    project = None
+    if args.project:
+        from .core.project import Project
+        project = Project.load(args.project)
+        if not project.episodes and not project.characters:
+            project.title = args.project
+        if args.style:
+            project.style = args.style
+        project.save()
+
     goal = " ".join(args.goal) or "一只小猫在花园里追蝴蝶，5 秒钟短视频"
     try:
-        run(goal, brain=brain)
+        run(goal, brain=brain, project=project, episode=args.episode)
     except KeyboardInterrupt:
         print("\n⏹ 已手动停止（大脑已保存）")
         return 130

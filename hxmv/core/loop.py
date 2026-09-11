@@ -34,7 +34,7 @@ from .state import ExecutionState, TaskStatus
 
 def banner(state: ExecutionState) -> None:
     print("\n" + "═" * 52)
-    print(f"  HxMV 自主控制闭环  v0.4 · 真产物 + 真眼睛")
+    print(f"  HxMV 自主控制闭环  v0.5 · 真产物 + 真眼睛 + 项目档案")
     print(f"  目标：{state.goal}")
     print("═" * 52)
 
@@ -68,6 +68,9 @@ def summary(state: ExecutionState) -> None:
         for t in real:
             f = t.result.get("media") or t.result.get("output") or ""
             print(f"    · {os.path.basename(str(f)):24s} → {probe.describe(t.result['metrics'])}")
+    reused = [t for t in state.completed if t.result.get("reused")]
+    if reused:
+        print(f"\n  ♻ 复用已有画面 {len(reused)} 个（档案命中指纹 → 没有重新生成/没有重新花钱）")
     print(f"\n  总尝试 {state.budget.attempts} 次 | 总成本 {state.budget.used:.2f} 元"
           f" | 迭代 {state.iteration} 轮")
     mem = state.memory.get("quality", {})
@@ -122,12 +125,18 @@ def run(goal: str,
         planner=None, executor=None, critic=None, controller=None,
         context: ContextManager | None = None,
         brain: Brain | None = None,
+        project=None,
+        episode: int | None = None,
         verbose: bool = True,
         emit=None) -> ExecutionState:
     """跑一个目标到完成，返回最终 ExecutionState（可继续检视/续跑）。
 
     brain：持久记忆（"大脑"）。不传则自动加载 ~/.hxmv/brain.json。
     经验在闭环中自动积累：PASS 回写、下次 run 自动注入 Planner。
+    project：项目档案（跨 run 记住风格/角色/已生成画面）。传入后：
+      - 规划沿用档案里的角色/场景/风格（不会新建角色）
+      - 生成前先查档案指纹，命中就**复用已有画面，不重新生成**
+      - 跑完把本次记成新的一集（episode 可指定集号）
     emit：可选事件回调 emit(dict)——每个关键节点收到一个 JSON 可序列化事件。
     事件订阅者抛异常不影响闭环（观察层永远不打断生产）。
     """
@@ -144,6 +153,8 @@ def run(goal: str,
     provider_hint = ""
     if verbose:
         banner(state)
+        if project is not None:
+            print(f"  📁 {project.describe()}")
         if brain.size:
             print(f"  🧠 大脑：{brain.stats()}（已加载，自动注入规划）")
         else:
@@ -152,11 +163,15 @@ def run(goal: str,
            "budget_max_attempts": state.budget.max_total_attempts,
            "budget_max_cost": state.budget.max_cost_units})
 
-    executor = executor or make_executor()
+    executor = executor or make_executor(project=project, episode=episode)
     critic = critic or PipelineCritic()
     controller = controller or Controller(brain=brain)
     context = context or ContextManager()
-    planner = planner or make_planner(state, brain)  # 工厂：LLM 优先（带记忆），失败落 Mock
+    planner = planner or make_planner(state, brain, project)  # 工厂：LLM 优先（带记忆/项目）
+
+    provider = getattr(executor, "provider", None)
+    if provider is not None and hasattr(provider, "set_episode"):
+        provider.set_episode(episode)
 
     while True:
         if state.budget.exhausted:
@@ -206,6 +221,8 @@ def run(goal: str,
             _emit({"type": "decision", "task_id": task.task_id, "action": task.action,
                    "decision": "FAIL", "reason": "infra", "note": "服务不可用（重试耗尽）"})
             continue
+        if verbose and result.get("reused"):
+            print("  ♻ 复用已有画面（未重新生成，0 成本）")
 
         # 3) 观察（三层 Critic 合并报告）→ 4) 判断推进
         report = critic.evaluate(task, result)
@@ -248,7 +265,15 @@ def run(goal: str,
         summary(state)
         print(f"  🧠 大脑已更新：{brain.stats()}（经验持久化到 {brain.path}）")
     brain.save()
+    if project is not None:
+        outputs = [t.result.get("output") or t.result.get("media") for t in state.completed]
+        project.add_episode(goal, outputs, episode)
+        project.save()
+        if verbose:
+            print(f"  📁 项目档案已更新：{project.describe()}")
     _emit({"type": "run.done", "phase": state.phase,
+           "n_reused": sum(1 for t in state.completed if t.result.get("reused")),
+           "project": project.summary() if project is not None else None,
            "completed": [{"action": t.action, "task_id": t.task_id,
                           "score": t.result.get("_score"),
                           "refine_history": list(t.refine_history)} for t in state.completed],

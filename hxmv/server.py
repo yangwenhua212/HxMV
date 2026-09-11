@@ -91,12 +91,13 @@ class RunManager:
         self.lock = threading.Lock()
         threading.Thread(target=self._worker_loop, daemon=True).start()
 
-    def submit(self, goal: str, provider: str = "") -> str:
+    def submit(self, goal: str, provider: str = "", project: str = "") -> str:
         run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
         rec = RunRecorder(run_id)
         with self.lock:
             self.recorders[run_id] = rec
-        self.queue.put({"run_id": run_id, "goal": goal, "provider": provider})
+        self.queue.put({"run_id": run_id, "goal": goal, "provider": provider,
+                        "project": project})
         return run_id
 
     def get(self, run_id: str) -> RunRecorder | None:
@@ -113,8 +114,13 @@ class RunManager:
             os.environ["HXMV_PROVIDER"] = job["provider"] or ""  # 串行 worker，安全
             # 产物落到本 run 自己的目录：面板就能按 run 取回真文件（local provider 用）
             os.environ["HXMV_ARTIFACTS"] = os.path.join(RUNS_DIR, run_id, "artifacts")
+            proj = None
+            if job.get("project"):
+                from .core.project import Project
+                proj = Project.load(job["project"])
             try:
-                run(job["goal"], brain=Brain(), verbose=False, emit=rec.emit)
+                run(job["goal"], brain=Brain(), project=proj,
+                    verbose=False, emit=rec.emit)
             except Exception as e:  # 内核异常也要把 run 收尾，别让订阅者挂死
                 rec.emit({"type": "run.done", "phase": "ERROR",
                           "error": str(e), "completed": [], "failed": [],
@@ -174,7 +180,7 @@ def _scan_runs() -> list[dict]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HxMV/0.4"
+    server_version = "HxMV/0.5"
 
     # ---- helpers ----
     def _send_json(self, obj, code: int = 200) -> None:
@@ -332,8 +338,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_err(400, "goal 不能为空")
             return
         provider = PROVIDERS.get(str(body.get("provider", "mock")), "")
-        run_id = MANAGER.submit(goal, provider)
-        self._send_json({"run_id": run_id, "provider": provider or "mock"}, 202)
+        project = str(body.get("project", "")).strip()
+        run_id = MANAGER.submit(goal, provider, project)
+        self._send_json({"run_id": run_id, "provider": provider or "mock",
+                         "project": project or None}, 202)
 
 
 def main() -> None:
