@@ -324,8 +324,14 @@ def cleanup_frames(tmp: str) -> None:
 
 # ---------- 汇总：一次测量 → 指标 + 缺陷 ----------
 
-def detect_defects(m: dict, expect_duration: float | None = None) -> list[str]:
-    """从量出来的指标推缺陷（纯判据，可单测）。"""
+def detect_defects(m: dict, expect_duration: float | None = None,
+                   expect_audio: bool = False) -> list[str]:
+    """从量出来的指标推缺陷（纯判据，可单测）。
+
+    expect_audio：**默认无声**——AI 视频本来就不带音轨，用户没要音频时"没音轨"是正常状态，
+    不是缺陷（判它就会每条都废片，还会派生一个修不动的 enable_audio）。
+    只有任务明确要音频（with_audio）时，缺音轨/音量低才算缺陷。
+    """
     t = THRESHOLDS
     defects: list[str] = []
     if (m.get("height") or 0) < t["min_height"]:
@@ -341,12 +347,13 @@ def detect_defects(m: dict, expect_duration: float | None = None) -> list[str]:
     if m.get("fps") and m["fps"] < t["min_fps"]:
         defects.append("fps_too_low")
     vol = m.get("mean_volume_db")
-    if not m.get("has_audio"):
-        # 没有音轨 ≠ 音量低：真 AI 视频默认就是无声的，判成"音量过低"会每条都废片，
-        # 而"增益"对一个不存在的音轨是空操作（实测：修了 4 次模型全一样）。这是两种不同的病。
-        defects.append("no_audio")
-    elif vol is not None and vol < t["min_mean_volume_db"]:
-        defects.append("low_volume")
+    if expect_audio:
+        # 要了音频才谈音频缺陷；且"没音轨"与"音量低"是两种病（增益对不存在的音轨是空操作）
+        if not m.get("has_audio"):
+            defects.append("no_audio")
+        elif vol is not None and vol < t["min_mean_volume_db"]:
+            defects.append("low_volume")
+    # 没要音频 → 有声无声都不判缺陷，只作遥测（默认无声）
     if (m.get("black_seconds") or 0) > t["black_seconds"]:
         defects.append("black_frame")
     if (m.get("freeze_seconds") or 0) > t["freeze_seconds"]:
@@ -361,7 +368,8 @@ def detect_defects(m: dict, expect_duration: float | None = None) -> list[str]:
     return defects
 
 
-def inspect(path: str | None, expect_duration: float | None = None) -> dict | None:
+def inspect(path: str | None, expect_duration: float | None = None,
+            expect_audio: bool = False) -> dict | None:
     """量一个媒体文件：返回指标 + defects；不是真文件/没 ffmpeg → None（调用方回落 mock 标签）。"""
     if not is_media_file(path):
         return None
@@ -375,15 +383,15 @@ def inspect(path: str | None, expect_duration: float | None = None) -> dict | No
     m["mean_volume_db"] = vol
     m["black_seconds"] = black
     m["freeze_seconds"] = freeze
-    m["defects"] = detect_defects(m, expect_duration)
+    m["defects"] = detect_defects(m, expect_duration, expect_audio)
     return m
 
 
 def describe(m: dict) -> str:
     """指标 → 一行中文摘要（终端/面板展示用）。"""
     fps = f"{m['fps']:.0f}" if m.get("fps") else "?"
-    vol = (f"{m['mean_volume_db']:.1f}dB" if m.get("mean_volume_db") is not None
-           else "无音轨")
+    vol = (f"{m['mean_volume_db']:.1f}dB" if m.get("has_audio")
+           else "无声（默认）")
     return (f"实测 {m.get('width')}x{m.get('height')}@{fps}fps "
-            f"{m.get('duration') or 0:.1f}s 音量{vol} "
+            f"{m.get('duration') or 0:.1f}s 音频{vol} "
             f"黑帧{m.get('black_seconds') or 0:.2f}s 静止{m.get('freeze_seconds') or 0:.2f}s")

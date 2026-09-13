@@ -113,7 +113,9 @@ class L1PhysicsCritic(Critic):
             return QualityReport(layer=self.layer)
 
         target = result.get("media") if task.action == ACTION_GENERATE_SHOT else result.get("output")
-        metrics = probe.inspect(target, expect_duration=task.input.get("duration"))
+        # 默认无声：只有这条任务明确要音频（with_audio）时，缺音轨/音量低才算缺陷
+        metrics = probe.inspect(target, expect_duration=task.input.get("duration"),
+                                expect_audio=bool(task.input.get("with_audio")))
         if metrics is not None:
             result["metrics"] = metrics                    # 量出来的原始指标，随事件流给面板/审计
             return self._report(metrics["defects"], detail=probe.describe(metrics))

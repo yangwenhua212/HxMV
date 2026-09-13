@@ -240,7 +240,7 @@ $("tokenInput").addEventListener("keydown", e => { if (e.key === "Enter") $("con
 const ACTIONS = { STORYBOARD: "分镜", GENERATE_CHARACTER: "角色", GENERATE_SCENE: "场景", GENERATE_SHOT: "镜头", COMPOSE: "成片" };
 const FAILURES = {
   black_frame: "黑帧", low_clarity: "清晰度不足", motion_blur: "运动模糊", fps_too_low: "帧率过低",
-  low_volume: "音量过低", no_audio: "没有音轨", character_inconsistency: "角色不一致", scene_inconsistency: "场景不一致",
+  low_volume: "音量过低", no_audio: "缺音轨（任务要了音频）", character_inconsistency: "角色不一致", scene_inconsistency: "场景不一致",
   semantic_mismatch: "与剧本不符", frozen_frame: "画面静止", too_short: "时长不足", too_long: "超时长"
 };
 const SUGGESTIONS = {
