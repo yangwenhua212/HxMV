@@ -33,14 +33,15 @@ PROJECTS_DIR = os.environ.get("HXMV_PROJECTS", os.path.expanduser("~/.hxmv/proje
 # provider：**谁生成的画面**必须进指纹——本地合成和真模型出的像素完全不同，
 # 不带这一维的话，同一个项目先跑 mock 再跑真模型会互相复用对方的文件（实测踩过）。
 _FP_KEYS = ("prompt", "duration", "resolution", "fps", "seed", "reference_strength",
-            "provider",
+            "provider", "ref_kind",
             "motion_scale", "audio_gain_db", "trim_black", "character", "scene", "style",
             "with_audio", "scene_strength",
             # 语义守卫：改的是发给模型的提示词 → 必须进指纹，否则命中缓存、修了等于没修
             "_guard_closer", "_guard_action", "_guard_emotion", "_guard_continuity")
 
 
-def fp_params(task, project=None, provider: str | None = None) -> dict:
+def fp_params(task, project=None, provider: str | None = None,
+              extra: dict | None = None) -> dict:
     """按 `_FP_KEYS` 从 input+constraints 里取参数——**白名单是唯一真相，别再手写字典**。
 
     以前 provider 手写 `fingerprint({...})` 逐个列键：新加的参数（`with_audio`、
@@ -55,6 +56,7 @@ def fp_params(task, project=None, provider: str | None = None) -> dict:
     if project is not None and not merged.get("style"):
         merged["style"] = getattr(project, "style", None)
     merged["provider"] = provider or merged.get("provider")
+    merged.update(extra or {})          # provider 现场算出来的值（如实际用了哪类参考图）
     return {k: merged.get(k) for k in _FP_KEYS}
 
 

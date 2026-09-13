@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 from .state import ExecutionState, Task, TaskStatus
-from .refiner import Refiner
+from .refiner import MEASURABLE_FIXES, Refiner
 
 
 class Controller:
@@ -47,10 +47,19 @@ class Controller:
         # 修正没生效的识别：**同样的失败 + 同样的实测值** = 上一轮那几刀在产物上没落地。
         # 真 API 上实测过：extend_duration 改了三次，出来的还是同一个 5.1 秒片——
         # 那不是"还在收敛"，是同一个动作重复烧额度，必须收手。
-        measured = result.get("measured")
+        #
+        # 但只有**物理类**修正才能这么判：提示词类（四条守卫）/参考强度/运动幅度改的是画面内容，
+        # 物理实测值本来就一样，拿它当"没落地"的证据会误杀（实测踩过：语义修正被提前收手，
+        # 明明该重生成一次看看）。所以：上一轮只要动过非物理旋钮，就不许收手。
+        measured = result.get("measured") or {}
+        prev_fixes = [f.split(":")[0].strip() for f in (task.refine_history or [])]
+        metrics = {MEASURABLE_FIXES.get(f) for f in prev_fixes}
+        measurable_only = bool(prev_fixes) and None not in metrics
+        relevant = {k: measured.get(k) for k in sorted(metrics)} if measurable_only else None
         sig = (tuple(sorted(report.failures)),
-               json.dumps(measured, sort_keys=True, ensure_ascii=False) if measured else "")
-        if report.failures and task.retry_policy.get("last_sig") == sig:
+               json.dumps(relevant, sort_keys=True, ensure_ascii=False)) \
+            if relevant is not None else None
+        if report.failures and sig is not None and task.retry_policy.get("last_sig") == sig:
             self._fail(state, task)
             state.observations.append(
                 {"task_id": task.task_id, "report": report,

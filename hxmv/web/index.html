@@ -475,10 +475,17 @@ function showSummary(ev, runId, aborted) {
 }
 
 function paintArts(files, runId, rows) {
+  // 排序：成片最前（他要的第一眼就是成品），然后镜头，最后素材底图
+  const rank = p => { const n = String(p).split("/").pop();
+    return n.startsWith("final") ? 0 : n.startsWith("shot") ? 1 : 2; };
+  files.sort((a, b) => rank(a) - rank(b) || String(a).localeCompare(String(b)));
   const arts = files.map(p => {
     const name = String(p).split("/").pop();
     const url = `/api/artifact?run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(name)}&token=${encodeURIComponent(TOKEN)}`;
-    const kind = name.startsWith("final") ? "成片" : name.endsWith(".png") ? "参考图" : "镜头";
+    const kind = name.startsWith("final") ? "成片"
+      : name.startsWith("shot") ? "镜头"
+      : name.startsWith("asset_") ? "底图（模型起始帧，不是参考图）"
+      : "素材";
     const head = `<div class="line">🎬 ${kind} <a href="${url}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(name)}</a></div>`;
     // 页面里直接播/看：手机浏览器点 .mp4 链接多半没反应（真机反馈「视频看不了」）
     if (name.endsWith(".mp4")) return head + `<video class="art" controls playsinline preload="metadata" src="${url}"></video>`;
@@ -684,6 +691,7 @@ async function refreshRef() {
     const el = document.createElement("div");
     el.className = "refItem";
     el.innerHTML = '<img src="' + hxUrl(it.url) + '" alt=""><b>' + esc(it.label + "·" + it.key) + '</b>'
+      + (it.placeholder ? '<b style="color:var(--amber)">占位（系统生成，建议换成真图）</b>' : "")
       + (it.exists ? '<button title="注销">×</button>' : '<b style="color:var(--red)">文件丢了</b>');
     if (it.exists) el.querySelector("button").onclick = () => delRef(it);
     box.appendChild(el);
