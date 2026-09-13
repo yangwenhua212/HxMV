@@ -52,6 +52,17 @@ def consolidate_artifacts(state, artifacts_dir: str) -> list[str]:
                 except OSError:
                     continue
         out.append(dest)
+    # 已经躺在本次产物目录里的文件也算数——有的任务把片子真写出来了、最后却被判失败。
+    # 实测：COMPOSE 产出了 10 秒成片（可播），但被记进 failed，面板就永远看不到成片。
+    try:
+        for name in sorted(os.listdir(artifacts_dir)):
+            if len(out) >= MAX_FILES:
+                break
+            p = os.path.join(artifacts_dir, name)
+            if _is_media(p) and p not in out:
+                out.append(p)
+    except OSError:
+        pass
     # 成片排最前，其余按名字稳定排序
     out.sort(key=lambda x: (0 if os.path.basename(x).startswith("final") else 1,
                             os.path.basename(x)))

@@ -58,6 +58,8 @@ HXMV_WEB_TOKEN = os.environ.get("HXMV_WEB_TOKEN", "")
 # 参考图上传：只收图片，硬限制体积（面板在手机上用，别让一张原图把内存撑爆）
 MAX_REF_B64 = 16 * 1024 * 1024          # base64 字符串上限 ≈ 12MB 原图
 REF_KINDS = ("character", "scene")
+# 按磁盘列产物时认哪些后缀（面板的成片/镜头/参考图展示用）
+MEDIA_EXTS = (".mp4", ".png", ".jpg", ".jpeg", ".webp")
 
 PROVIDERS = {"mock": "", "fake": "fake", "local": "local", "zhipu": "zhipu", "kling": "kling"}
 
@@ -518,14 +520,62 @@ class Handler(BaseHTTPRequestHandler):
                 return
             ctype = "video/mp4" if name.endswith(".mp4") else \
                 "image/png" if name.endswith(".png") else "application/octet-stream"
+            size = os.path.getsize(path)
+            # Range 支持：手机浏览器里的 <video> 要按段取（拖动进度/快速起播都靠它），
+            # 只回整文件时播放器容易一直转圈（真机反馈「视频看不了」）
+            m = re.match(r"bytes=(\d*)-(\d*)\s*$", (self.headers.get("Range") or "").strip())
+            if m and size > 0 and (m.group(1) or m.group(2)):
+                start = int(m.group(1)) if m.group(1) else 0
+                end = int(m.group(2)) if m.group(2) else size - 1
+                end = min(end, size - 1)
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                length = end - start + 1
+                self.send_response(206)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.send_header("Content-Length", str(length))
+                self.send_header("Content-Disposition", f'inline; filename="{name}"')
+                self.end_headers()
+                with open(path, "rb") as f:
+                    f.seek(start)
+                    self.wfile.write(f.read(length))
+                return
             with open(path, "rb") as f:
                 body = f.read()
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Disposition", f'inline; filename="{name}"')
             self.end_headers()
             self.wfile.write(body)
+            return
+
+        if p.startswith("/api/run/") and p.endswith("/files"):
+            # 该 run 产物目录里**真实存在**的文件（磁盘为准）。为什么单独一个口：
+            # 有的任务把片子写出来了却收尾判失败（实测 COMPOSE），只按 run.done.outputs
+            # 展示就会漏掉成片——真机反馈「生成的视频看不了」就是这个。
+            run_id = p[len("/api/run/"):-len("/files")]
+            if not run_id or not run_id.replace("-", "").isalnum():
+                self._send_err(400, "run_id 不合法")
+                return
+            adir = os.path.join(RUNS_DIR, run_id, "artifacts")
+            files = []
+            try:
+                for name in sorted(os.listdir(adir)):
+                    fp = os.path.join(adir, name)
+                    if os.path.isfile(fp) and name.lower().endswith(MEDIA_EXTS):
+                        files.append({"name": name, "size": os.path.getsize(fp)})
+            except OSError:
+                self._send_err(404, f"run 不存在: {run_id}")
+                return
+            self._send_json({"run_id": run_id, "files": files})
             return
 
         if p.startswith("/api/run/") and not p.endswith("/events"):
