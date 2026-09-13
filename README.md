@@ -149,6 +149,11 @@ python3 -m hxmv "30 秒产品宣传片，现代极简风"
 export HXMV_VLM_MODEL=glm-4v-flash      # 智谱视觉版，或 gpt-4o-mini 等
 python3 -m hxmv --doctor               # 看「视觉评审（L2/L3 真看图）」那一项是否 ✅
 
+# 图生视频：先把参考图登记进项目（角色的"脸"就从这儿锁）
+python3 -m hxmv --set-ref 柯基短剧 character 柯基 参考图.jpg     # 自动裁主视觉
+python3 -m hxmv --list-ref 柯基短剧                             # 看登记了哪些
+python3 -m hxmv --provider zhipu --project 柯基短剧 "柯基在雪地里奔跑"   # 注意：别加 --fresh，它会清档案
+
 # 没 Key 也能验证「真看图」链路（帧到底发出去没有、判定有没有驱动修正）：
 python3 tools/fake_vlm.py 8799                       # 仿真视觉端点：不带图的请求直接被 400
 export OPENAI_API_KEY=test-key OPENAI_BASE_URL=http://127.0.0.1:8799/v1 HXMV_VLM_MODEL=fake-vlm
@@ -173,6 +178,7 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - 侧栏实时显示大脑沉淀（LESSON 升华），底部历史 run 点击即回放
 - 事件存档：`~/.hxmv/runs/<id>/events.jsonl`（可审计、可回放）
 - 公网：设 `HXMV_WEB_TOKEN` 后所有 `/api/*` 需 token（header 或 `?token=`），面板 URL 带一次即记住
+- **参考图卡片**：填项目名 → 选图片 → **预览**（自动把设定表裁成 16:9 主视觉）→ 存为参考图。镜头就会从这张图开始动，不用碰命令行
 - **设置页**（顶部分页）直接配接口：粘贴智谱 / 可灵 Key、切视频模型档位（免费 / 付费）、切视觉评审档位，保存即生效——不用再命令行 `--set-key`，手机上也能配
 
 ## 路线

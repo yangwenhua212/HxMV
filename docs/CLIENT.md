@@ -31,6 +31,10 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 | `/api/artifact?run_id=&name=` | GET | 取产物字节（mp4/png，`Content-Disposition: inline`） |
 | `/api/config` | GET | **接口配置状态**（面板设置页用）：各 provider 是否配好 Key（只回**脱敏**串，明文永不回传）、`options.video_model`／`options.vlm_model` 当前档位、`vision{ready,model}` |
 | `/api/config` | POST `{provider,key?,video_model?,vlm_model?}` | **保存接口配置**（写入实例本机 `~/.hxmv/config.json`，600）。Key 不回传；档位保存后**立即生效**，不用重启 |
+| `/api/ref?project=` | GET | 项目参考图清单：`{characters:[{key,name,exists,size,url}],scenes:[…]}`——客户端可直接把 `url` 塞进 `<img>`（记得带 token） |
+| `/api/ref/image?project=&kind=&key=` | GET | 取参考图字节（`kind`=character/scene）。路径只从项目档案里取，不接受外来路径 |
+| `/api/ref` | POST `{project,kind,key,mode?,preview?,image}` | **上传参考图**（图生视频的首帧）。`image` 为 data URL 或裸 base64（≤12MB，JPEG/PNG）；`mode`=auto/crop_top/keep（auto=设定表自动裁上部主视觉）；`preview=true` 只回裁切预览不落库 |
+| `/api/ref` | DELETE `?project=&kind=&key=` | 注销一张参考图（档案里摘掉 + 删掉 refs/ 下的文件） |
 | `/dl/<文件名>` | GET | 分发包下载（客户端安装包等，放 `~/.hxmv/dl/`；公开、免 token、支持断点续传） |
 
 **认证**：`X-Hxmv-Token` 头（或 `?token=`，SSE 只能用 query）。健康检查也需要 token（除非服务端没设 `HXMV_WEB_TOKEN`）。

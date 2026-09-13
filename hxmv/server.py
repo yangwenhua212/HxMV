@@ -12,6 +12,10 @@
     GET  /api/brain              → 大脑条目（只读展示）
     GET  /api/health             → **自检 + 能力**（HxSync 等客户端用来"发现实例"）
     GET  /api/artifact?run_id=&name= → 取产物文件（成片/镜头/参考图）
+    GET  /api/ref?project=…      → 项目参考图清单（角色/场景 + 缩略图地址）
+    GET  /api/ref/image?project=&kind=&key= → 取参考图字节（面板缩略图）
+    POST /api/ref                → **上传参考图**（含 auto 自动裁主视觉；preview=true 只预览不落库）
+    DELETE /api/ref              → 注销一张参考图
     GET  /dl/<文件名>            → 分发包下载（客户端安装包等，放 ~/.hxmv/dl/，公开不带 token）
 
 客户端友好（HxSync）：
@@ -25,6 +29,8 @@
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import queue
@@ -34,7 +40,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .core.brain import Brain
 from .core.loop import run
@@ -48,6 +54,10 @@ WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "inde
 # 公网防护：设置 HXMV_WEB_TOKEN 后，所有 /api/* 请求需带 token
 # （header X-Hxmv-Token 或 query ?token=，EventSource 只能用 query）
 HXMV_WEB_TOKEN = os.environ.get("HXMV_WEB_TOKEN", "")
+
+# 参考图上传：只收图片，硬限制体积（面板在手机上用，别让一张原图把内存撑爆）
+MAX_REF_B64 = 16 * 1024 * 1024          # base64 字符串上限 ≈ 12MB 原图
+REF_KINDS = ("character", "scene")
 
 PROVIDERS = {"mock": "", "fake": "fake", "local": "local", "zhipu": "zhipu", "kling": "kling"}
 
@@ -233,10 +243,46 @@ class Handler(BaseHTTPRequestHandler):
         """公网 token 校验（未设置 HXMV_WEB_TOKEN 时全放行，保持本地零配置）。"""
         if not HXMV_WEB_TOKEN:
             return True
-        from urllib.parse import parse_qs
         q = parse_qs(urlparse(self.path).query)
         tok = self.headers.get("X-Hxmv-Token") or (q.get("token") or [""])[0]
         return tok == HXMV_WEB_TOKEN
+
+    @staticmethod
+    def _fix_mojibake(s: str) -> str:
+        """中文查询串的老坑：http.server 按 latin-1 解请求行，非 ASCII 会变乱码。
+
+        浏览器会百分号编码所以正常；但手搓客户端/某些 App 直传 UTF-8 字节时，
+        这里把它修回来，否则项目名"石猴出世"永远查不到。
+        """
+        try:
+            return s.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return s
+
+    @staticmethod
+    def _safe_pid(pid: str) -> str:
+        """项目名 → 安全目录名（只允许中英文/数字/-_）。空串=不合法，防路径穿越。
+
+        外来输入只在这里过一道闸：Project.load 直接用项目名拼路径。
+        """
+        p = Handler._fix_mojibake(pid or "").strip()
+        if not p or len(p) > 64:
+            return ""
+        return p if all(c.isalnum() or c in "-_" for c in p) else ""
+
+    @staticmethod
+    def _decode_image(raw: str) -> bytes | None:
+        """接受 data URL 或裸 base64；解不出/超限返回 None。"""
+        raw = (raw or "").strip()
+        if raw.startswith("data:") and "," in raw[:64]:
+            raw = raw.split(",", 1)[1]
+        if not raw or len(raw) > MAX_REF_B64:
+            return None
+        try:
+            blob = base64.b64decode(raw, validate=False)
+        except (binascii.Error, ValueError):
+            return None
+        return blob or None
 
     def log_message(self, *args) -> None:  # 静音默认访问日志
         pass
@@ -366,10 +412,58 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"runs": _scan_runs()})
             return
 
+        if p == "/api/ref":
+            # 项目参考图清单（面板"参考图"卡片）——路径全部来自项目档案，不接受外来路径
+            if not self._authed():
+                self._send_err(401, "unauthorized")
+                return
+            from .core import project as project_mod
+            qs = parse_qs(u.query)
+            pid = self._safe_pid(str((qs.get("project") or [""])[0]))
+            data = {"project": pid, "characters": [], "scenes": []}
+            if pid:
+                proj = project_mod.Project.load(pid)
+                for kind, book, bucket in (("character", proj.characters, "characters"),
+                                           ("scene", proj.scenes, "scenes")):
+                    for key, hit in book.items():
+                        path = hit.get("path", "")
+                        ok = bool(path) and os.path.isfile(path)
+                        data[bucket].append({
+                            "key": key, "name": hit.get("name") or key, "exists": ok,
+                            "size": os.path.getsize(path) if ok else 0,
+                            "updated": hit.get("updated"),
+                            "url": "/api/ref/image?project=" + quote(pid) +
+                                   "&kind=" + kind + "&key=" + quote(key)})
+            self._send_json(data)
+            return
+
+        if p == "/api/ref/image":
+            if not self._authed():
+                self._send_err(401, "unauthorized")
+                return
+            from .core import project as project_mod
+            qs = parse_qs(u.query)
+            pid = self._safe_pid(str((qs.get("project") or [""])[0]))
+            kind = str((qs.get("kind") or ["character"])[0]).strip().lower()
+            key = self._fix_mojibake(str((qs.get("key") or [""])[0]))
+            hit = project_mod.Project.load(pid).asset(kind, key) if (pid and key) else None
+            if kind not in REF_KINDS or not hit:
+                self._send_err(404, "参考图不存在")
+                return
+            with open(hit["path"], "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg" if hit["path"].endswith(".jpg")
+                             else "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if p == "/api/artifact":
             # 取回某个 run 的真实产物（local provider 渲出来的 mp4/png）。
             # 只看 run 目录下的 artifacts/，文件名做白名单校验，防穿越。
-            from urllib.parse import parse_qs
             qs = parse_qs(u.query)
             run_id = (qs.get("run_id") or [""])[0]
             name = (qs.get("name") or [""])[0]
@@ -411,7 +505,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if p.startswith("/api/stream"):
-            from urllib.parse import parse_qs
             qs = parse_qs(u.query)
             run_id = (qs.get("run_id") or [""])[0]
             rec = MANAGER.get(run_id)
@@ -442,6 +535,27 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_err(404, f"未知路径: {p}")
+
+    def do_DELETE(self) -> None:
+        u = urlparse(self.path)
+        if u.path != "/api/ref":
+            self._send_err(404, f"未知路径: {u.path}")
+            return
+        if not self._authed():
+            self._send_err(401, "unauthorized")
+            return
+        from .core import project as project_mod
+        qs = parse_qs(u.query)
+        body = self._read_body()
+        pid = self._safe_pid(str(body.get("project") or (qs.get("project") or [""])[0]))
+        kind = str(body.get("kind") or (qs.get("kind") or ["character"])[0]).strip().lower()
+        key = self._fix_mojibake(str(body.get("key") or (qs.get("key") or [""])[0])).strip()
+        if not pid or kind not in REF_KINDS or not key:
+            self._send_err(400, "需要 project / kind / key")
+            return
+        removed = project_mod.Project.load(pid).unregister_asset(kind, key)
+        self._send_json({"ok": removed, "removed": removed,
+                         "detail": "已注销" if removed else "档案里没有这个键"})
 
     def do_POST(self) -> None:
         u = urlparse(self.path)
@@ -489,6 +603,69 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "vision": {"ready": llm.vision_available(),
                                                    "model": llm.vision_model()}})
             return
+        if u.path == "/api/ref":
+            # **上传参考图**（面板用）：图片走 base64 JSON（std lib 解析 multipart 太脏）。
+            # 自动裁主视觉由 media/sheet.py 干；preview=true 只回预览不落库，手机上先看一眼再存。
+            if not self._authed():
+                self._send_err(401, "unauthorized")
+                return
+            import tempfile
+
+            from .core import project as project_mod
+            from .media import sheet
+            body = self._read_body()
+            pid = self._safe_pid(str(body.get("project", "")))
+            if not pid:
+                self._send_err(400, "项目名不合法（只允许中英文、数字、- 和 _）")
+                return
+            kind = str(body.get("kind", "character")).strip().lower()
+            if kind not in REF_KINDS:
+                self._send_err(400, "kind 只能是 character/scene")
+                return
+            blob = self._decode_image(str(body.get("image", "")))
+            if not blob:
+                self._send_err(400, "图片数据不合法或超过 12MB（支持 JPEG/PNG）")
+                return
+            mode = str(body.get("mode", "auto")).strip().lower()
+            if mode not in sheet.MODES:
+                self._send_err(400, f"裁切模式只能是 {'/'.join(sheet.MODES)}")
+                return
+            src = os.path.join(tempfile.mkdtemp(prefix="hxmv-ref-"), "src.bin")
+            with open(src, "wb") as f:
+                f.write(blob)
+            try:
+                if body.get("preview"):
+                    out = src + ".jpg"
+                    info = sheet.normalize(src, out, mode)
+                    with open(out, "rb") as f:
+                        preview = base64.b64encode(f.read()).decode()
+                    self._send_json({"ok": True, "preview": "data:image/jpeg;base64," + preview,
+                                     "box": info["box"], "src_size": info["src_size"],
+                                     "out_size": info["out_size"], "mode": info["mode"],
+                                     "engine": info["engine"]})
+                    return
+                key = str(body.get("key", "")).strip()
+                if not key:
+                    self._send_err(400, "需要给一个键名（镜头约束里的角色名/场景名）")
+                    return
+                proj = project_mod.Project.load(pid)
+                info = sheet.save_reference(proj, kind, key, src, mode,
+                                            name=str(body.get("name", "")).strip() or key,
+                                            style=proj.style)
+                self._send_json({"ok": True, "project": pid, "key": info["key"],
+                                 "kind": info["kind"], "box": info["box"],
+                                 "src_size": info["src_size"], "out_size": info["out_size"],
+                                 "mode": info["mode"], "engine": info["engine"],
+                                 "path": info["path"]})
+            except (ValueError, OSError, RuntimeError) as e:
+                self._send_err(400, f"处理失败: {e}")
+            finally:
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+            return
+
         if u.path != "/api/run":
             self._send_err(404, f"未知路径: {u.path}")
             return

@@ -121,6 +121,21 @@ class Project:
                      "updated": time.time(), **meta}
         self.save()
 
+    def unregister_asset(self, kind: str, key: str) -> bool:
+        """注销一张参考图（面板"删除"用）：档案里摘掉 + 删掉文件。"""
+        book = self.characters if kind == "character" else self.scenes
+        hit = book.pop(key, None)
+        if not hit:
+            return False
+        self.save()
+        p = hit.get("path", "")
+        if p and os.path.isfile(p) and os.sep + "refs" + os.sep in p:
+            try:                      # 只删我们自己的 refs/ 下的文件，别误删产物
+                os.remove(p)
+            except OSError:
+                pass
+        return True
+
     # ---------- 镜头：指纹命中 = 复用文件，跳过生成 ----------
     def shot(self, fp: str) -> dict | None:
         hit = self.shots.get(fp)

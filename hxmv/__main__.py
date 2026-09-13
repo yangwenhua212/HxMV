@@ -36,6 +36,14 @@ def main() -> int:
     ap.add_argument("--episode", type=int, default=None, help="第几集（默认自动递增）")
     ap.add_argument("--style", default=None, help="项目风格（首次创建项目时用，默认 cinematic）")
     ap.add_argument("--list-projects", action="store_true", help="列出已有项目档案")
+    ap.add_argument("--set-ref", nargs=4, default=None, metavar=("PROJECT", "KIND", "KEY", "IMAGE"),
+                    help="登记参考图（图生视频的首帧）：KIND=character/scene，"
+                         "例：--set-ref 石猴出世 character 小石猴 设定表.jpg")
+    ap.add_argument("--ref-mode", default="auto", choices=("auto", "crop_top", "keep"),
+                    help="参考图裁切：auto=设定表自动取上部主视觉（默认），keep=原样")
+    ap.add_argument("--list-ref", default=None, metavar="PROJECT", help="列出该项目的参考图")
+    ap.add_argument("--del-ref", nargs=3, default=None, metavar=("PROJECT", "KIND", "KEY"),
+                    help="注销一张参考图")
     args = ap.parse_args()
 
     from .core import config
@@ -73,6 +81,54 @@ def main() -> int:
             print(f"  {r['id']:18s} 风格={r['style']:12s} 角色 {r['characters']} 场景/画面 {r['shots']} "
                   f"分集 {r['episodes']}")
         return 0
+
+    if args.set_ref:
+        # 参考图入口（命令行版）：与面板"上传参考图"共用 media/sheet.py 的自动裁主视觉
+        from .core.project import Project
+        from .media import sheet
+        pid, kind, key, img = (str(x) for x in args.set_ref)
+        kind = kind.strip().lower()
+        if kind not in ("character", "scene"):
+            print("⚠ KIND 只能是 character 或 scene")
+            return 1
+        if not os.path.isfile(img):
+            print(f"⚠ 找不到图片：{img}")
+            return 1
+        proj = Project.load(pid)
+        try:
+            info = sheet.save_reference(proj, kind, key, img, args.ref_mode,
+                                        name=key.strip(), style=proj.style)
+        except (ValueError, OSError, RuntimeError) as e:
+            print(f"⚠ 登记失败：{e}")
+            return 1
+        sw, sh = info["src_size"]
+        ow, oh = info["out_size"]
+        print(f"✅ 参考图已登记：项目「{proj.id}」 {kind} = {info['key']}")
+        print(f"   裁切[{info['mode']}/{info['engine']}] {sw}x{sh} → {ow}x{oh}")
+        print(f"   文件：{info['path']}")
+        print("   下一步：跑生产时**不要加 --fresh**（它会清空档案），"
+              "并让镜头的约束用这个键名——图生视频的首帧就是它")
+        return 0
+    if args.list_ref:
+        from .core.project import Project
+        from .media import sheet
+        proj = Project.load(args.list_ref)
+        for kind, book, label in (("character", proj.characters, "角色"),
+                                  ("scene", proj.scenes, "场景")):
+            print(f"{label} {len(book)} 张：")
+            if not book:
+                print("  （空——用 --set-ref 登记，面板也能传）")
+            for k, hit in book.items():
+                exists = os.path.isfile(hit.get("path", ""))
+                print(f"  {k:14s} {'✅' if exists else '❌文件丢了'}  {hit.get('path', '')}")
+        print(f"裁切说明：{sheet.MODE_LABELS['auto']}")
+        return 0
+    if args.del_ref:
+        from .core.project import Project
+        pid, kind, key = (str(x) for x in args.del_ref)
+        ok = Project.load(pid).unregister_asset(kind.strip().lower(), key.strip())
+        print("✅ 已注销" if ok else "⚠ 档案里没有这个键")
+        return 0 if ok else 1
 
     if args.fresh:
         path = args.brain or os.path.expanduser("~/.hxmv/brain.json")

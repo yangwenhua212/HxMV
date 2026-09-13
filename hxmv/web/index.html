@@ -49,6 +49,22 @@
   #runBtn:hover { background: var(--accent-strong); }
   #runBtn:disabled { opacity: .5; cursor: not-allowed; }
   #runHint { font-size: 13px; color: var(--amber); min-height: 18px; }
+  .row input { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; font-size: 14px; font-family: inherit; min-width: 140px; }
+  .row input:focus { outline: none; border-color: var(--accent); }
+  .row input::placeholder { color: var(--dim); }
+  #projectInput, #refKey { flex: 1; }
+
+  /* 参考图：图生视频的首帧 */
+  #refHint { font-size: 13px; color: var(--accent-strong); min-height: 18px; margin-top: 8px; }
+  .fileBtn { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 9px 14px; font-size: 14px; cursor: pointer; }
+  .fileBtn:hover { border-color: var(--accent); }
+  #refFileName { font-size: 13px; color: var(--dim); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #refPreview { display: none; width: 100%; margin-top: 10px; border-radius: 10px; border: 1px solid var(--border); }
+  .refGrid { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .refItem { position: relative; width: 104px; }
+  .refItem img { width: 104px; height: 62px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); display: block; background: var(--panel2); }
+  .refItem b { display: block; font-size: 12px; font-weight: 500; color: var(--dim); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .refItem button { position: absolute; top: 3px; right: 3px; padding: 0 6px; font-size: 12px; line-height: 18px; border-radius: 6px; background: rgba(10,18,16,.8); color: var(--red); border: 1px solid var(--border); }
 
   /* 时间线 */
   .ev { border-left: 2px solid var(--border); padding: 1px 0 16px 18px; margin-left: 7px; position: relative; }
@@ -133,6 +149,32 @@
         <button id="runBtn">开始生产</button>
         <span id="runHint"></span>
       </div>
+    </div>
+
+    <div class="card" id="refCard">
+      <h3>参考图 · 图生视频的首帧</h3>
+      <div class="row">
+        <select id="refKind">
+          <option value="character">角色</option>
+          <option value="scene">场景</option>
+        </select>
+        <input id="refKey" placeholder="键名（镜头里的角色名／场景名）">
+        <select id="refMode">
+          <option value="auto">自动裁主视觉</option>
+          <option value="crop_top">只取上部</option>
+          <option value="keep">原样不裁</option>
+        </select>
+      </div>
+      <div class="row">
+        <label class="fileBtn" for="refFile">选图片</label>
+        <input id="refFile" type="file" accept="image/*" hidden>
+        <span id="refFileName"></span>
+        <button id="refPreviewBtn">预览</button>
+        <button id="refSaveBtn">存为参考图</button>
+      </div>
+      <div id="refHint"></div>
+      <img id="refPreview" alt="">
+      <div class="refGrid" id="refList"></div>
     </div>
 
     <div class="card" id="liveCard">
@@ -233,6 +275,7 @@ $("connectBtn").onclick = () => {
   refreshBrain();
   refreshRuns();
   refreshConfig();
+  refreshRef();
 };
 $("tokenInput").addEventListener("keydown", e => { if (e.key === "Enter") $("connectBtn").click(); });
 
@@ -477,8 +520,96 @@ $("vlmModel").onchange = () => saveConfig("zhipu", "keyZhipu");
 
 $("runBtn").onclick = submitRun;
 $("goalInput").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitRun(); });
+
+// ---------- 参考图（图生视频的首帧）：上传 → 自动裁主视觉 → 落进项目档案 ----------
+function refHint(msg, isErr) { $("refHint").textContent = (isErr ? "⚠ " : "✓ ") + msg; }
+function refProject() { return $("projectInput").value.trim(); }
+function refFileData() {
+  const f = $("refFile").files[0];
+  if (!f) return Promise.reject(new Error("先选一张图片"));
+  return new Promise((ok, no) => {
+    const r = new FileReader();
+    r.onload = () => ok(r.result);
+    r.onerror = () => no(new Error("读不出这个文件"));
+    r.readAsDataURL(f);
+  });
+}
+async function refPayload(preview) {
+  const pid = refProject();
+  if (!pid) throw new Error("先在上面填项目名");
+  const key = $("refKey").value.trim();
+  if (!preview && !key) throw new Error("填一个键名（镜头里的角色名／场景名）");
+  return { project: pid, kind: $("refKind").value, key: key, name: key,
+           mode: $("refMode").value, preview: !!preview, image: await refFileData() };
+}
+function hxUrl(path) { return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN); }
+async function refreshRef() {
+  const box = $("refList"), pid = refProject();
+  if (!pid) { box.innerHTML = ""; refHint("上面填了项目名，就能传参考图"); return; }
+  let d = { characters: [], scenes: [] };
+  try { d = await (await hx("/api/ref?project=" + encodeURIComponent(pid))).json(); } catch (e) {}
+  const items = [].concat(
+    (d.characters || []).map(x => Object.assign({}, x, { kind: "character", label: "角色" })),
+    (d.scenes || []).map(x => Object.assign({}, x, { kind: "scene", label: "场景" })));
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">这个项目还没有参考图——传一张，镜头就从它开始动</div>';
+    refHint("上面填了项目名，就能传参考图");
+    return;
+  }
+  box.innerHTML = "";
+  refHint("这个项目已有 " + items.length + " 张参考图（镜头会从它们开始动）");
+  for (const it of items) {
+    const el = document.createElement("div");
+    el.className = "refItem";
+    el.innerHTML = '<img src="' + hxUrl(it.url) + '" alt=""><b>' + esc(it.label + "·" + it.key) + '</b>'
+      + (it.exists ? '<button title="注销">×</button>' : '<b style="color:var(--red)">文件丢了</b>');
+    if (it.exists) el.querySelector("button").onclick = () => delRef(it);
+    box.appendChild(el);
+  }
+}
+async function delRef(it) {
+  const q = "?project=" + encodeURIComponent(refProject()) + "&kind=" + it.kind + "&key=" + encodeURIComponent(it.key);
+  const d = await (await fetch("/api/ref" + q, { method: "DELETE", headers: { "X-Hxmv-Token": TOKEN } })).json();
+  refHint(d.removed ? "已注销「" + it.key + "」" : (d.detail || "没找到"), !d.removed);
+  refreshRef();
+}
+$("refPreviewBtn").onclick = async () => {
+  try {
+    refHint("正在裁…");
+    const d = await (await hx("/api/ref", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(await refPayload(true)) })).json();
+    if (!d.ok) { refHint(d.error || "预览失败", true); return; }
+    const img = $("refPreview");
+    img.src = d.preview; img.style.display = "block";
+    const sw = d.src_size[0], sh = d.src_size[1], ow = d.out_size[0], oh = d.out_size[1];
+    refHint("预览：" + sw + "×" + sh + " → " + ((sw === ow && sh === oh) ? "原样保留" : "裁成 " + ow + "×" + oh));
+  } catch (e) { refHint(e.message, true); }
+};
+$("refSaveBtn").onclick = async () => {
+  try {
+    refHint("正在存…");
+    const d = await (await hx("/api/ref", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(await refPayload(false)) })).json();
+    if (!d.ok) { refHint(d.error || "保存失败", true); return; }
+    const img = $("refPreview");
+    img.src = hxUrl("/api/ref/image?project=" + encodeURIComponent(d.project) + "&kind=" + d.kind + "&key=" + encodeURIComponent(d.key));
+    img.style.display = "block";
+    refHint("已登记 " + d.out_size[0] + "×" + d.out_size[1] + "：跑生产时不要用 --fresh，否则档案会被清掉");
+    refreshRef();
+  } catch (e) { refHint(e.message, true); }
+};
+$("refFile").onchange = () => {
+  const f = $("refFile").files[0];
+  $("refFileName").textContent = f ? f.name : "";
+  $("refPreview").style.display = "none";
+  refHint(f ? "已选好图片，点「预览」看裁切效果" : "还没选图片");
+};
+$("projectInput").addEventListener("change", refreshRef);
+$("projectInput").addEventListener("blur", refreshRef);
+
 refreshConn();
 refreshBrain(); refreshRuns();
+refreshRef();
 setInterval(refreshBrain, 10000);
 </script>
 </body>
