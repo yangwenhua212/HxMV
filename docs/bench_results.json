@@ -1,0 +1,729 @@
+{
+  "provider": "mock",
+  "planner": "mock",
+  "goals": 8,
+  "projects_dir": "/home/admin/.hxmv/bench/projects",
+  "rounds": [
+    {
+      "goals": 8,
+      "pass_rate": 0.625,
+      "first_pass_rate": 0.125,
+      "avg_attempts": 8.38,
+      "cost_units": 121.0,
+      "seconds": 78.8,
+      "round": 1,
+      "items": [
+        {
+          "attempts": 6,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 8.0,
+          "first_pass": true,
+          "pass": true,
+          "fixes": [],
+          "seconds": 4.04,
+          "output": "  ✅ COMPOSE 3a862b2b 通过 score=1.00",
+          "state_ok": true,
+          "goal": "一只柯基在雪地里奔跑，5 秒短片",
+          "id": "g1"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 6.41,
+          "output": "  ✅ COMPOSE 1b44a501 通过 score=1.00",
+          "state_ok": true,
+          "goal": "小猫在窗台上看雨，5 秒",
+          "id": "g2"
+        },
+        {
+          "attempts": 12,
+          "completed": 5,
+          "failed": 1,
+          "reused": 0,
+          "cost_units": 26.0,
+          "first_pass": false,
+          "pass": false,
+          "fixes": [
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 18.99,
+          "output": "  ✅ COMPOSE e58a306e 通过 score=1.00",
+          "state_ok": true,
+          "goal": "城市夜景车流延时，8 秒",
+          "id": "g3"
+        },
+        {
+          "attempts": 12,
+          "completed": 5,
+          "failed": 1,
+          "reused": 0,
+          "cost_units": 26.0,
+          "first_pass": false,
+          "pass": false,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 17.45,
+          "output": "  ✅ COMPOSE aeb0f44d 通过 score=1.00",
+          "state_ok": true,
+          "goal": "海边日落，一只海鸥飞过，5 秒",
+          "id": "g4"
+        },
+        {
+          "attempts": 7,
+          "completed": 5,
+          "failed": 1,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": false,
+          "fixes": [],
+          "seconds": 6.21,
+          "output": "  ✅ COMPOSE 745c613a 通过 score=1.00",
+          "state_ok": true,
+          "goal": "森林里的萤火虫，6 秒",
+          "id": "g5"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 6.05,
+          "output": "  ✅ COMPOSE 86640cb0 通过 score=1.00",
+          "state_ok": true,
+          "goal": "雪山航拍，10 秒",
+          "id": "g6"
+        },
+        {
+          "attempts": 9,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 17.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength",
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 9.61,
+          "output": "  ✅ COMPOSE 9a5c8eea 通过 score=1.00",
+          "state_ok": true,
+          "goal": "花朵绽放特写，5 秒",
+          "id": "g7"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 10.04,
+          "output": "  ✅ COMPOSE 97ba0339 通过 score=1.00",
+          "state_ok": true,
+          "goal": "街头滑板少年，8 秒",
+          "id": "g8"
+        }
+      ],
+      "brain": "11 条（经验 11 / 事实 0）"
+    },
+    {
+      "goals": 8,
+      "pass_rate": 0.75,
+      "first_pass_rate": 0.25,
+      "avg_attempts": 7.25,
+      "cost_units": 94.0,
+      "seconds": 62.5,
+      "round": 2,
+      "items": [
+        {
+          "attempts": 10,
+          "completed": 5,
+          "failed": 1,
+          "reused": 0,
+          "cost_units": 20.0,
+          "first_pass": false,
+          "pass": false,
+          "fixes": [],
+          "seconds": 17.56,
+          "output": "  ✅ COMPOSE 75580b03 通过 score=1.00",
+          "state_ok": true,
+          "goal": "一只柯基在雪地里奔跑，5 秒短片",
+          "id": "g1"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 7.56,
+          "output": "  ✅ COMPOSE ed468178 通过 score=1.00",
+          "state_ok": true,
+          "goal": "小猫在窗台上看雨，5 秒",
+          "id": "g2"
+        },
+        {
+          "attempts": 6,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 8.0,
+          "first_pass": true,
+          "pass": true,
+          "fixes": [],
+          "seconds": 5.67,
+          "output": "  ✅ COMPOSE 279d645b 通过 score=1.00",
+          "state_ok": true,
+          "goal": "城市夜景车流延时，8 秒",
+          "id": "g3"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 7.19,
+          "output": "  ✅ COMPOSE e1aa3999 通过 score=1.00",
+          "state_ok": true,
+          "goal": "海边日落，一只海鸥飞过，5 秒",
+          "id": "g4"
+        },
+        {
+          "attempts": 8,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 14.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength",
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 8.52,
+          "output": "  ✅ COMPOSE d026a929 通过 score=1.00",
+          "state_ok": true,
+          "goal": "森林里的萤火虫，6 秒",
+          "id": "g5"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 5.73,
+          "output": "  ✅ COMPOSE 1ffb9346 通过 score=1.00",
+          "state_ok": true,
+          "goal": "雪山航拍，10 秒",
+          "id": "g6"
+        },
+        {
+          "attempts": 6,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 8.0,
+          "first_pass": true,
+          "pass": true,
+          "fixes": [],
+          "seconds": 4.52,
+          "output": "  ✅ COMPOSE 506c84fe 通过 score=1.00",
+          "state_ok": true,
+          "goal": "花朵绽放特写，5 秒",
+          "id": "g7"
+        },
+        {
+          "attempts": 7,
+          "completed": 5,
+          "failed": 1,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": false,
+          "fixes": [],
+          "seconds": 5.71,
+          "output": "  ✅ COMPOSE ab5a0e47 通过 score=1.00",
+          "state_ok": true,
+          "goal": "街头滑板少年，8 秒",
+          "id": "g8"
+        }
+      ],
+      "brain": "11 条（经验 11 / 事实 0）"
+    },
+    {
+      "goals": 8,
+      "pass_rate": 0.875,
+      "first_pass_rate": 0.125,
+      "avg_attempts": 7.25,
+      "cost_units": 94.0,
+      "seconds": 59.4,
+      "round": 3,
+      "items": [
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 8.45,
+          "output": "  ✅ COMPOSE e6ab0954 通过 score=1.00",
+          "state_ok": true,
+          "goal": "一只柯基在雪地里奔跑，5 秒短片",
+          "id": "g1"
+        },
+        {
+          "attempts": 7,
+          "completed": 5,
+          "failed": 1,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": false,
+          "fixes": [],
+          "seconds": 7.19,
+          "output": "  ✅ COMPOSE 1977b5d7 通过 score=1.00",
+          "state_ok": true,
+          "goal": "小猫在窗台上看雨，5 秒",
+          "id": "g2"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 9.83,
+          "output": "  ✅ COMPOSE 0bc42898 通过 score=1.00",
+          "state_ok": true,
+          "goal": "城市夜景车流延时，8 秒",
+          "id": "g3"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 5.17,
+          "output": "  ✅ COMPOSE effbaea6 通过 score=1.00",
+          "state_ok": true,
+          "goal": "海边日落，一只海鸥飞过，5 秒",
+          "id": "g4"
+        },
+        {
+          "attempts": 9,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 17.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength",
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 6.7,
+          "output": "  ✅ COMPOSE bab289a9 通过 score=1.00",
+          "state_ok": true,
+          "goal": "森林里的萤火虫，6 秒",
+          "id": "g5"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 7.65,
+          "output": "  ✅ COMPOSE d1d7ed85 通过 score=1.00",
+          "state_ok": true,
+          "goal": "雪山航拍，10 秒",
+          "id": "g6"
+        },
+        {
+          "attempts": 6,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 8.0,
+          "first_pass": true,
+          "pass": true,
+          "fixes": [],
+          "seconds": 4.72,
+          "output": "  ✅ COMPOSE d7768346 通过 score=1.00",
+          "state_ok": true,
+          "goal": "花朵绽放特写，5 秒",
+          "id": "g7"
+        },
+        {
+          "attempts": 8,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 14.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 9.72,
+          "output": "  ✅ COMPOSE 7b940a05 通过 score=1.00",
+          "state_ok": true,
+          "goal": "街头滑板少年，8 秒",
+          "id": "g8"
+        }
+      ],
+      "brain": "11 条（经验 11 / 事实 0）"
+    },
+    {
+      "goals": 8,
+      "pass_rate": 1.0,
+      "first_pass_rate": 0.375,
+      "avg_attempts": 6.75,
+      "cost_units": 82.0,
+      "seconds": 55.2,
+      "round": 4,
+      "items": [
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 7.18,
+          "output": "  ✅ COMPOSE 1223320d 通过 score=1.00",
+          "state_ok": true,
+          "goal": "一只柯基在雪地里奔跑，5 秒短片",
+          "id": "g1"
+        },
+        {
+          "attempts": 6,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 8.0,
+          "first_pass": true,
+          "pass": true,
+          "fixes": [],
+          "seconds": 4.19,
+          "output": "  ✅ COMPOSE 7fcec962 通过 score=1.00",
+          "state_ok": true,
+          "goal": "小猫在窗台上看雨，5 秒",
+          "id": "g2"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 7.16,
+          "output": "  ✅ COMPOSE 0c426b8b 通过 score=1.00",
+          "state_ok": true,
+          "goal": "城市夜景车流延时，8 秒",
+          "id": "g3"
+        },
+        {
+          "attempts": 6,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 8.0,
+          "first_pass": true,
+          "pass": true,
+          "fixes": [],
+          "seconds": 4.49,
+          "output": "  ✅ COMPOSE c6603ba0 通过 score=1.00",
+          "state_ok": true,
+          "goal": "海边日落，一只海鸥飞过，5 秒",
+          "id": "g4"
+        },
+        {
+          "attempts": 6,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 8.0,
+          "first_pass": true,
+          "pass": true,
+          "fixes": [],
+          "seconds": 3.18,
+          "output": "  ✅ COMPOSE ee69d78e 通过 score=1.00",
+          "state_ok": true,
+          "goal": "森林里的萤火虫，6 秒",
+          "id": "g5"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 10.73,
+          "output": "  ✅ COMPOSE eebc42eb 通过 score=1.00",
+          "state_ok": true,
+          "goal": "雪山航拍，10 秒",
+          "id": "g6"
+        },
+        {
+          "attempts": 8,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 14.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength",
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 9.59,
+          "output": "  ✅ COMPOSE 36769cf3 通过 score=1.00",
+          "state_ok": true,
+          "goal": "花朵绽放特写，5 秒",
+          "id": "g7"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 8.68,
+          "output": "  ✅ COMPOSE a5a049c5 通过 score=1.00",
+          "state_ok": true,
+          "goal": "街头滑板少年，8 秒",
+          "id": "g8"
+        }
+      ],
+      "brain": "11 条（经验 11 / 事实 0）"
+    },
+    {
+      "goals": 8,
+      "pass_rate": 1.0,
+      "first_pass_rate": 0.125,
+      "avg_attempts": 7.25,
+      "cost_units": 94.0,
+      "seconds": 51.7,
+      "round": 5,
+      "items": [
+        {
+          "attempts": 8,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 14.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 4.55,
+          "output": "  ✅ COMPOSE 99af8bc9 通过 score=1.00",
+          "state_ok": true,
+          "goal": "一只柯基在雪地里奔跑，5 秒短片",
+          "id": "g1"
+        },
+        {
+          "attempts": 8,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 14.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength",
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 5.32,
+          "output": "  ✅ COMPOSE 5eb6188b 通过 score=1.00",
+          "state_ok": true,
+          "goal": "小猫在窗台上看雨，5 秒",
+          "id": "g2"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 6.09,
+          "output": "  ✅ COMPOSE 4a4c9c63 通过 score=1.00",
+          "state_ok": true,
+          "goal": "城市夜景车流延时，8 秒",
+          "id": "g3"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 7.0,
+          "output": "  ✅ COMPOSE e5bf223f 通过 score=1.00",
+          "state_ok": true,
+          "goal": "海边日落，一只海鸥飞过，5 秒",
+          "id": "g4"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 5.44,
+          "output": "  ✅ COMPOSE 8e5d32a4 通过 score=1.00",
+          "state_ok": true,
+          "goal": "森林里的萤火虫，6 秒",
+          "id": "g5"
+        },
+        {
+          "attempts": 8,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 14.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "increase_reference_strength"
+          ],
+          "seconds": 12.38,
+          "output": "  ✅ COMPOSE 78399649 通过 score=1.00",
+          "state_ok": true,
+          "goal": "雪山航拍，10 秒",
+          "id": "g6"
+        },
+        {
+          "attempts": 7,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 11.0,
+          "first_pass": false,
+          "pass": true,
+          "fixes": [
+            "rewrite_prompt_closer"
+          ],
+          "seconds": 6.2,
+          "output": "  ✅ COMPOSE 1b79d06e 通过 score=1.00",
+          "state_ok": true,
+          "goal": "花朵绽放特写，5 秒",
+          "id": "g7"
+        },
+        {
+          "attempts": 6,
+          "completed": 6,
+          "failed": 0,
+          "reused": 0,
+          "cost_units": 8.0,
+          "first_pass": true,
+          "pass": true,
+          "fixes": [],
+          "seconds": 4.68,
+          "output": "  ✅ COMPOSE 29ecba46 通过 score=1.00",
+          "state_ok": true,
+          "goal": "街头滑板少年，8 秒",
+          "id": "g8"
+        }
+      ],
+      "brain": "11 条（经验 11 / 事实 0）"
+    }
+  ]
+}

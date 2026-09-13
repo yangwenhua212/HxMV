@@ -7,6 +7,8 @@ V0.1 提供两个实现：
 """
 from __future__ import annotations
 
+import os
+
 import json
 import re
 
@@ -278,7 +280,17 @@ def make_planner(state: ExecutionState, brain=None, project=None) -> Planner:
 
     project：项目档案——两种规划都必须**沿用档案里的角色/场景/风格**，
     否则每次跑都会"新建角色"，前一次的画面就白做了。
+
+    HXMV_PLANNER=mock|llm 可强制指定（跑基准集必须能锁死规划器，
+    否则同一目标每次规划都不一样，分数没有可比性）。
     """
+    forced = os.environ.get("HXMV_PLANNER", "").strip().lower()
+    if forced == "mock":
+        return MockPlanner(brain, project)
+    if forced in ("llm", "auto") or not forced:
+        pass
+    else:
+        state.log(f"⚠ 未知 HXMV_PLANNER={forced}，按 auto 处理")
     if llm.llm_available():
         p = LLMPlanner(brain, project)
         probe = p.next_task(state)
