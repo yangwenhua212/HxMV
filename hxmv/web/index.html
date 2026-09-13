@@ -605,7 +605,8 @@ async function postJson(path, body) {
     throw new Error(res.status === 413 ? "图片太大被网关拦下（HTTP 413）——换小一点的图，或先压一下再传"
                                        : "服务器回了非 JSON 响应（HTTP " + res.status + "）");
   }
-  if (d.error) throw new Error(d.error);
+  if (d.error) throw new Error(res.status === 401 ? "没连上（令牌没带上）：先在「连接」卡填令牌，或改用带令牌的面板入口再传"
+                                                  : d.error);
   return d;
 }
 function baseName(n) { return String(n || "").replace(/\.[^.]+$/, "").trim(); }
