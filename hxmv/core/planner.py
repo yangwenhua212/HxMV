@@ -65,9 +65,15 @@ class Planner:
         if "reduce_motion_scale" in learned:      # 运动模糊 → 动作幅度（在 constraints 里）
             cons["motion_scale"] = 0.25
             notes.append("运动幅度 0.25")
-        if "rewrite_prompt_closer" in learned:    # 语义不符 → 提示词起手就贴剧本
-            inp["_semantic_guard"] = True
-            notes.append("提示词贴剧本")
+        # 语义守卫：哪一类失败学得多，哪一条就起手带上（动作/情绪/衔接分别对应）
+        for sug, key, label in (
+                ("rewrite_prompt_closer", "_guard_closer", "贴剧本"),
+                ("rewrite_prompt_action", "_guard_action", "锁动作"),
+                ("rewrite_prompt_emotion", "_guard_emotion", "锁情绪"),
+                ("rewrite_prompt_continuity", "_guard_continuity", "锁衔接")):
+            if sug in learned:
+                inp[key] = True
+                notes.append("提示词" + label)
         return inp, cons, notes
 
     def next_task(self, state: ExecutionState) -> Task | None:

@@ -29,10 +29,33 @@ PROJECTS_DIR = os.environ.get("HXMV_PROJECTS", os.path.expanduser("~/.hxmv/proje
 # 参与指纹的参数（决定"这一帧画面长什么样"的全部输入）
 # 指纹白名单：**只放真会改变产物内容的参数**。漏一个的后果是灾难性的——
 # 修正改了它、指纹却没变 → 命中缓存复用旧文件 → 修了等于没修（实测踩过两次：
-# with_audio 开音轨、_semantic_guard 改提示词，都被静默忽略）。
+# with_audio 开音轨、_guard_* 改提示词，都被静默忽略）。
+# provider：**谁生成的画面**必须进指纹——本地合成和真模型出的像素完全不同，
+# 不带这一维的话，同一个项目先跑 mock 再跑真模型会互相复用对方的文件（实测踩过）。
 _FP_KEYS = ("prompt", "duration", "resolution", "fps", "seed", "reference_strength",
+            "provider",
             "motion_scale", "audio_gain_db", "trim_black", "character", "scene", "style",
-            "with_audio", "_semantic_guard", "scene_strength")
+            "with_audio", "scene_strength",
+            # 语义守卫：改的是发给模型的提示词 → 必须进指纹，否则命中缓存、修了等于没修
+            "_guard_closer", "_guard_action", "_guard_emotion", "_guard_continuity")
+
+
+def fp_params(task, project=None, provider: str | None = None) -> dict:
+    """按 `_FP_KEYS` 从 input+constraints 里取参数——**白名单是唯一真相，别再手写字典**。
+
+    以前 provider 手写 `fingerprint({...})` 逐个列键：新加的参数（`with_audio`、
+    `_guard_*`）没人去列 → 指纹不变 → 命中档案复用旧画面 → 修正等于没修。
+    实测踩过三次，所以改成"从白名单取"，以后加参数只需改 `_FP_KEYS` 一处。
+    """
+    merged: dict = {}
+    merged.update(task.constraints or {})
+    merged.update(task.input or {})
+    if not merged.get("prompt"):
+        merged["prompt"] = merged.get("goal")
+    if project is not None and not merged.get("style"):
+        merged["style"] = getattr(project, "style", None)
+    merged["provider"] = provider or merged.get("provider")
+    return {k: merged.get(k) for k in _FP_KEYS}
 
 
 def fingerprint(params: dict) -> str:

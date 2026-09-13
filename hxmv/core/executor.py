@@ -54,7 +54,7 @@ class MockVideoExecutor(Executor):
 
     def _fp(self, task: Task) -> str:
         from .project import fingerprint
-        return fingerprint({**task.input, **task.constraints,
+        return fingerprint({**task.input, **task.constraints, "provider": "mock",
                             "prompt": task.input.get("prompt") or task.input.get("goal")})
 
     def _physics_defects(self, rng: random.Random, task: Task) -> list[str]:
