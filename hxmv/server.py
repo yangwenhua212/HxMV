@@ -496,6 +496,9 @@ class Handler(BaseHTTPRequestHandler):
                         ok = bool(path) and os.path.isfile(path)
                         data[bucket].append({
                             "key": key, "name": hit.get("name") or key, "exists": ok,
+                            # placeholder=系统造的占位素材（色卡），不是用户传的参考图——
+                            # 面板要标出来，否则用户以为自己的参考图变成色卡了
+                            "placeholder": bool(hit.get("placeholder")),
                             "size": os.path.getsize(path) if ok else 0,
                             "updated": hit.get("updated"),
                             "url": "/api/ref/image?project=" + quote(pid) +

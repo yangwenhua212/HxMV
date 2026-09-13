@@ -138,7 +138,11 @@ class LocalRenderProvider(VideoProvider):
         ])
         self._assets[key] = path
         if self.project:
-            self.project.register_asset(kind, key, path, name=key, style=self.project.style)
+            # placeholder=True 很关键：这是**系统造的占位素材**（色卡 + 键名），不是用户传的
+            # 参考图。真实模型 provider（智谱/可灵）拿到它会当首帧发给模型 → 等于让模型照色卡
+            # 发挥，一致性检查也是拿色卡当基准（等于没检查）。标记出来，下游据此跳过。
+            self.project.register_asset(kind, key, path, name=key,
+                                        style=self.project.style, placeholder=True)
         return path
 
     def _reference_for(self, task) -> tuple[str | None, str | None]:

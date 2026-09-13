@@ -216,7 +216,34 @@ class ZhipuVideoProvider(VideoProvider):
         # 复用在最前面：档案里已有这个画面 → 一张都不重新生成（也不消耗额度）
         from ..core.project import fingerprint, fp_params
         cons, inp = task.constraints, task.input
-        fp = fingerprint(fp_params(task, self.project, f"zhipu/{self.model}"))
+
+        # 参考图：一张首帧只能锁**一件事**——默认锁角色（身份最难保），
+        # 可用 cons["ref_use"]="scene" 换成锁场景（空镜/环境更重要的镜头）。
+        # 解析在指纹之前：**实际用了哪类参考图**要算进指纹，否则改了 ref_use
+        # 指纹不变 → 复用旧画面（老坑，实测踩过三次）。
+        image = None
+        ref_path = None
+        ref_kind = None
+        if self.project:
+            ref_use = str(cons.get("ref_use") or "character").lower()
+            order = ("scene", "character") if ref_use == "scene" else ("character", "scene")
+            for kind in order:
+                key = cons.get(kind)
+                if not key:
+                    continue
+                hit = self.project.asset(kind, str(key))
+                if hit:
+                    if hit.get("placeholder"):
+                        # 占位素材（系统造的色卡，不是用户传的参考图）→ **不要当首帧发给模型**：
+                        # 实测喂色卡等于让模型照色卡发挥，还不如纯文字生成。再看另一类有没有真图。
+                        continue
+                    # 只给角色图时不必去比场景（否则真 AI 视频换个场景就被判"不一致"，
+                    # 而它根本没拿到场景参考——修无可修）
+                    ref_path, image, ref_kind = hit["path"], _data_url(hit["path"]), kind
+                    break
+
+        fp = fingerprint(fp_params(task, self.project, f"zhipu/{self.model}",
+                                   extra={"ref_kind": ref_kind}))
         if self.project:
             hit = self.project.shot(fp)
             if hit:
@@ -224,22 +251,7 @@ class ZhipuVideoProvider(VideoProvider):
                 saved.update({"reused": True, "fingerprint": fp, "cost_units": 0.0})
                 return saved
 
-        # 参考图：项目档案里的角色参考图（图生视频的首帧）→ 角色一致性硬约束
-        image = None
-        ref_path = None
-        ref_kind = None
-        if self.project:
-            for field, kind in (("character", "character"), ("scene", "scene")):
-                key = cons.get(field)
-                if key:
-                    hit = self.project.asset(kind, str(key))
-                    if hit:
-                        # 记下参考图是哪一类：只有角色图时不该去比场景（否则真 AI 视频
-                        # 换个场景就被判"场景不一致"，而它根本拿不到场景参考——修无可修）
-                        ref_path, image, ref_kind = hit["path"], _data_url(hit["path"]), kind
-                        break
-
-        prompt = self._build_prompt(task)
+        prompt = self._build_prompt(task, ref_kind=ref_kind)
         submitted = self._submit(task, prompt, image)
         task_id = submitted.get("id") or submitted.get("request_id")
         if not task_id:
@@ -285,7 +297,7 @@ class ZhipuVideoProvider(VideoProvider):
         return out
 
     @staticmethod
-    def _build_prompt(task) -> str:
+    def _build_prompt(task, ref_kind: str | None = None) -> str:
         """把分镜 + 风格约束拼成给生成模型看的提示词（英文更稳，CogVideoX 系对英文最敏感）。"""
         inp, cons = task.input, task.constraints
         parts = [str(inp.get("prompt") or inp.get("goal") or "").strip()]
@@ -299,6 +311,15 @@ class ZhipuVideoProvider(VideoProvider):
         # 由 refiner 的修正写进来（rewrite_prompt_*），也会被大脑学成"起手就带"。
         # 注意：这些开关改的就是**发给模型的提示词本身**，必须列进 _FP_KEYS，
         # 否则指纹不变 → 命中缓存 → 修了等于没修（老坑）。
+        # 场景锁／角色锁：首帧那张图只锁一类，另一类必须靠文字——不写清楚，
+        # 模型会把参考图的背景一起搬过来（实测：给草地上的柯基照片 → 出来还是草地，
+        # 要的雪地没出现，L3 判"不符"判得有理）。
+        if ref_kind == "character":
+            parts.append("the reference image defines ONLY the character's appearance — "
+                         "do not copy its background; the scene must be exactly as described above")
+        elif ref_kind == "scene":
+            parts.append("the reference image defines ONLY the environment — "
+                         "the character must strictly match the description above")
         if inp.get("_guard_closer"):
             parts.append("strictly follow the storyboard above; do not add anything not described")
         if inp.get("_guard_action"):

@@ -46,6 +46,21 @@ _HUMAN_HINT = {
     "rewrite_prompt_continuity": "与前后镜不连续 → 提示词补衔接约束",
 }
 
+# 哪些修正的效果**会**出现在实测值里（ffprobe/blackdetect/freezedetect/音量）。
+# 只有这些才允许用"实测值一模一样"推断"修正没落到产物上"——提示词类（`rewrite_prompt_*`）、
+# 参考强度、运动幅度改的是画面内容，物理实测值本来就不变，拿它判定会误杀重试。
+# 实测踩过：L3 判语义不符 → 提示词修正 → 被收手守卫当"没落地"提前收手。
+MEASURABLE_FIXES = {
+    "increase_resolution": "resolution",
+    "increase_fps": "fps",
+    "boost_audio_gain": "audio",
+    "enable_audio": "audio",
+    "trim_black_frames": "black_seconds",
+    "extend_duration": "duration",
+    "trim_duration": "duration",
+    "increase_motion_scale": "freeze_seconds",
+}
+
 # 一次最多应用几条修正。所有现有旋钮彼此正交（分辨率/帧率/音量/黑场/参考强度/运动/时长），
 # 上限只是「防未来出现互相打架的旋钮」的护栏——**别拿它省钱**：一次修到位比来回烧预算好。
 MAX_FIXES = 8
