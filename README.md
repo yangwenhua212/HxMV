@@ -45,6 +45,8 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/planner.py` | LLM 规划（OpenAI 兼容端点）；失败自动降级内置 Mock 规划。两种规划都**带着大脑记忆起手** |
 | `core/executor.py` | Mock 执行器：按参数概率注入真实感缺陷（物理/一致性缺陷概率都与参数挂钩，可被修好） |
 | `core/critic.py` | **三层 Critic**：L1 物理（ffmpeg 实测）/ L2 视觉（抽帧 + 视觉模型判身份）/ L3 语义（抽帧 + 视觉模型判分镜），合并为 QualityReport |
+| `media/sheet.py` | **设定表 → 首帧**：自动把角色设定表裁成 16:9 主视觉（`crop_box` 纯函数可单测；PIL 优先，退 ffmpeg）；CLI `--set-ref` 与面板「参考图」卡片共用 |
+| `tools/bench.py` | **基准集跑分（第三刀）**：固定目标 × 多轮，每轮换新项目、共享大脑 → 输出 `docs/BENCH.md` 曲线（首轮通过率 / 平均尝试 / 成本）|
 | `media/probe.py` | **真眼睛（v0.4）**：ffprobe/ffmpeg 从**真实媒体**里量出分辨率/帧率/时长/音量/黑帧/静止/外观一致度 |
 | `core/refiner.py` | 按 failures→suggestions 调参重投；**优先查质量记忆里的历史成功修正** |
 | `core/controller.py` | 判定 PASS/RETRY/FAIL；PASS 时把验证有效的修正回写质量记忆 |
@@ -190,6 +192,7 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - **V0.4** ✅ 真产物 + 真眼睛：FFmpeg 真渲染 + ffprobe 真测量 + 真像素一致性 + 参数学到的经验起手
 - **V0.5** ✅ 项目档案：风格/角色/已生成画面跨 run 记忆 + 剧情身份复用（续做不重画），Web 端可指定项目
 - **V0.6** ✅ 真 AI 视频接入：智谱 CogVideoX-Flash（免费）文/图生视频 + 角色参考图当首帧 + Key 本地配置（`--set-key`）+ 仿真端点自测
+- **V0.7** ✅ 真视觉闭环 + 两个入口 + 跑分：L2/L3 抽帧喂视觉模型（真看图）、面板/CLI **上传参考图**、**基准集跑分曲线**（`tools/bench.py` → `docs/BENCH.md`）
 - **V0.7** 🚧 **真视觉闭环 ✅**（L2 抽帧身份判定 + L3 抽帧语义评审，配 `HXMV_VLM_MODEL` 生效；未配则如实标注未做视觉检查）；资产一致性深化（参考图版本管理、跨镜头锁脸）、checkpoint 人工审批点 📋
 - **V0.8** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
