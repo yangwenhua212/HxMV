@@ -10,7 +10,7 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 
 | 模式 | HxMV 跑在哪 | 怎么接 | 现状 |
 |---|---|---|---|
-| **A. 远端**（推荐默认） | 服务器 / 家里机器 | 填地址 + token，走 HTTP/SSE | ✅ 服务端全就绪（`https://hxmv.eraherm.com`） |
+| **A. 远端**（推荐默认） | 服务器 / 家里机器 | 填地址 + token，走 HTTP/SSE | ✅ 服务端全就绪（填**你自己部署的**域名） |
 | **B. 端侧 Termux** | 手机自己的 Termux 里 | 一键安装脚本 → 连 `http://127.0.0.1:8668` | ✅ 脚本已就绪（`scripts/install-termux.sh`） |
 | **C. 内置内核** | 手机 App 进程内 | Chaquopy 嵌 Python + 打包 ffmpeg | ⚠ 未做（要 1-3 天，见第五节） |
 
@@ -60,7 +60,7 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
   "phase": "DONE", "ok": true, "completed": 6, "failed": 0, "attempts": 6, "cost_units": 0.0,
   "artifacts": [
     {"name": "final_4f201adb.mp4", "kind": "final", "size": 411337,
-     "url": "https://hxmv.eraherm.com/api/artifact?run_id=...&name=final_4f201adb.mp4"}
+     "url": "https://你自己的域名/api/artifact?run_id=...&name=final_4f201adb.mp4"}
   ],
   "needs_token": true,
   "text": "✅ 完成｜第2集…｜任务 6 项完成｜共 6 次尝试｜成本 0.0\n成片：final_4f201adb.mp4"
