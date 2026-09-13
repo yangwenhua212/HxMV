@@ -73,6 +73,9 @@
   /* 成片/产物：在页面里直接播/看（手机点链接不播） */
   .art { width: 100%; margin: 6px 0 12px; border-radius: 10px; border: 1px solid var(--border); background: #000; display: block; }
   .art-img { background: none; }
+  /* 过程记录折叠：不让几十条事件把成品挤到屏幕外 */
+  details.proc > summary { cursor: pointer; color: var(--dim); font-size: 13px; padding: 2px 0 6px; }
+  details.proc[open] > summary { margin-bottom: 12px; }
 
   /* 时间线 */
   .ev { border-left: 2px solid var(--border); padding: 1px 0 16px 18px; margin-left: 7px; position: relative; }
@@ -111,6 +114,7 @@
   .runit .s { color: var(--dim); font-size: 12px; margin-top: 2px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; }
   .dot.done { background: var(--green); } .dot.running { background: var(--amber); animation: blink 1s infinite; }
+  .dot.aborted { background: var(--red); }
   @keyframes blink { 50% { opacity: .2; } }
   .empty { color: var(--dim); font-size: 13px; text-align: center; padding: 26px 0; }
   #sumBox { display: none; }
@@ -186,14 +190,14 @@
       <div class="refGrid" id="refList"></div>
     </div>
 
-    <div class="card" id="liveCard">
-      <h3 id="liveTitle">实时过程</h3>
-      <div id="timeline"></div>
-    </div>
-
     <div class="card" id="sumBox">
       <h3>执行报告</h3>
       <div id="sumBody"></div>
+    </div>
+
+    <div class="card" id="liveCard">
+      <h3 id="liveTitle">实时过程</h3>
+      <div id="timeline"></div>
     </div>
   </section>
 
@@ -350,13 +354,13 @@ async function refreshRuns() {
     if (!(d.runs || []).length) { box.innerHTML = '<div class="empty">暂无</div>'; return; }
     box.innerHTML = d.runs.map(r => {
       const t = r.tail || {};
-      const running = r.status !== "done";
-      const stat = t.type === "run.done"
+      const st = r.status === "done" ? "done" : (r.status === "aborted" ? "aborted" : "running");
+      const stat = st === "done"
         ? `${(t.completed || []).length} 完成 · ${(t.failed || []).length} 失败 · 尝试 ${t.attempts}`
-        : "进行中…";
+        : st === "aborted" ? "已中断（服务重启会打断，可重跑）" : "进行中…";
       const ts = r.ts ? fmt(r.ts) : "";
       return `<div class="runit" onclick="replay('${r.run_id}')">
-        <span class="g"><span class="dot ${running ? "running" : "done"}"></span>${esc(r.goal.slice(0, 30))}</span>
+        <span class="g"><span class="dot ${st}"></span>${esc(r.goal.slice(0, 30))}</span>
         <span class="s">${ts} · ${stat}</span></div>`;
     }).join("");
   } catch (e) {
@@ -453,10 +457,11 @@ function startStream(runId) {
   es.onerror = () => {};
 }
 
-function showSummary(ev, runId) {
+function showSummary(ev, runId, aborted) {
   $("sumBox").style.display = "block";
   const rows = (ev.completed || []).map(c =>
-    `<div class="line">✅ <b>${ACTIONS[c.action] || c.action}</b> · 质量 ${c.score}${c.refine_history.length ? ` · 修正 ${c.refine_history.length} 次` : ""}</div>`).join("");
+    `<div class="line">✅ <b>${ACTIONS[c.action] || c.action}</b> · 质量 ${c.score}${c.refine_history.length ? ` · 修正 ${c.refine_history.length} 次` : ""}</div>`).join("")
+    + (aborted ? '<div class="line" style="color:var(--amber)">⚠️ 这次没跑完（服务重启会打断），下面是已经产出的</div>' : "");
   // 真实产物（local provider）：只给落盘的绝对路径做下载/预览链接
   const files = (ev.outputs || []).filter(p => String(p).startsWith("/"));
   // 磁盘为准：有的任务把文件真写出来了却被判失败（实测成片就是这样被漏掉的），
@@ -491,6 +496,7 @@ async function replay(runId) {
   $("liveTitle").textContent = "历史回放";
   try {
     const d = await (await hx(`/api/run/${runId}`)).json();
+    let done = null;
     for (const ev of d.events) {
       const div = document.createElement("div");
       div.className = "ev " + (ev.type + " " + (ev.decision || "")).toLowerCase();
@@ -502,10 +508,17 @@ async function replay(runId) {
       else if (ev.type === "infra.retry") html = t + `<div class="title" style="color:var(--amber)">服务繁忙，重试 ${ev.attempt}/4</div>`;
       else if (ev.type === "critic") html = t + `<div class="title">评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div><div>${(ev.failures || []).map(f => `<span class="pill red">${zh(FAILURES, f)}</span>`).join("")}</div>`;
       else if (ev.type === "decision") html = t + `<div class="title">${ev.decision === "PASS" ? "✅ 通过" : ev.decision === "RETRY" ? "🔧 重试" : "❌ 失败"}</div>`;
-      else if (ev.type === "run.done") html = t + `<div class="title">完成</div><div class="sub" style="color:var(--dim)">${ev.completed.length} 项完成 · ${ev.attempts} 次尝试</div>`;
+      else if (ev.type === "run.done") { done = ev; html = t + `<div class="title">完成</div><div class="sub" style="color:var(--dim)">${ev.completed.length} 项完成 · ${ev.attempts} 次尝试</div>`; }
       else continue;
       div.innerHTML = html; tl.appendChild(div);
     }
+    // 历史回放同样要交出成品：以前这里只画时间线、再也不打开「执行报告」，
+    // 于是在历史里点开任何一次跑都**永远看不到成片**（真机反馈「网页里看不了」的正主）
+    const n = tl.querySelectorAll(".ev").length;
+    if (n) tl.innerHTML = `<details class="proc"><summary>过程记录（${n} 步，点开看细节）</summary>${tl.innerHTML}</details>`;
+    // 没跑完的（服务重启会打断）也要把已有产物给出来——磁盘上有就让他看得到
+    showSummary(done || { completed: [], outputs: [] }, runId, !done);
+    $("sumBox").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) { tl.innerHTML = '<div class="empty">回放失败</div>'; }
 }
 
