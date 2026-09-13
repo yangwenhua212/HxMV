@@ -148,6 +148,12 @@ python3 -m hxmv "30 秒产品宣传片，现代极简风"
 # （主 LLM 多半是纯文本模型，把图发过去只会被忽略还答得一本正经）
 export HXMV_VLM_MODEL=glm-4v-flash      # 智谱视觉版，或 gpt-4o-mini 等
 python3 -m hxmv --doctor               # 看「视觉评审（L2/L3 真看图）」那一项是否 ✅
+
+# 没 Key 也能验证「真看图」链路（帧到底发出去没有、判定有没有驱动修正）：
+python3 tools/fake_vlm.py 8799                       # 仿真视觉端点：不带图的请求直接被 400
+export OPENAI_API_KEY=test-key OPENAI_BASE_URL=http://127.0.0.1:8799/v1 HXMV_VLM_MODEL=fake-vlm
+python3 -m hxmv "雪地里的柯基" --provider local --brain /tmp/brain.json --fresh
+cat /tmp/vlm_log.jsonl                               # 每次请求带几张图、判了什么，一目了然
 ```
 
 标准库 only，Python 3.10+；`ffmpeg`/`ffprobe` 是**可选**运行时依赖（只用 `local` provider 与真检测时需要，没装就自动回落 Mock 世界）。
