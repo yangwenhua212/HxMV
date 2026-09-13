@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 
 from ..media import probe
-from . import config
+from . import config, llm
 
 DATA_DIR = os.path.expanduser("~/.hxmv")
 
@@ -63,6 +63,15 @@ def run_checks(probe_network: bool = True) -> list[dict]:
         "name": "智谱 Key（真 AI 视频）", "ok": bool(zhipu),
         "detail": config.mask(zhipu) if zhipu else "未配置（只能用本地渲染/模拟世界）",
         "fix": "" if zhipu else "python3 -m hxmv --set-key zhipu <KEY>（bigmodel.cn 免费申请）",
+    })
+
+    # 视觉评审 = L2 身份判定 / L3 语义评审真看画面（没有它这两层是像素/文字兜底，别当成看过）
+    checks.append({
+        "name": "视觉评审（L2/L3 真看图）", "ok": llm.vision_available(),
+        "detail": (f"{llm.vision_model()}（有 Key，抽帧真看图）" if llm.vision_available()
+                   else "未配置 → L2 退回像素距离、L3 退回文字判断（结果里会标注未做视觉检查）"),
+        "fix": "" if llm.vision_available() else
+               "export OPENAI_API_KEY=<KEY> OPENAI_BASE_URL=<兼容端点> HXMV_VLM_MODEL=<视觉模型，如 glm-4v-flash>",
     })
 
     free_port = True

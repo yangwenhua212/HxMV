@@ -22,7 +22,7 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 
 | 接口 | 方法 | 说明 |
 |---|---|---|
-| `/api/health`（公开免令牌） | GET | **发现实例 + 能力自检**：版本、ffmpeg、编码器、各后端是否配好 Key、项目列表、是否需要 token |
+| `/api/health`（公开免令牌） | GET | **发现实例 + 能力自检**：版本、ffmpeg、编码器、**`vision`（L2/L3 是否配了视觉模型：`{"ready":bool,"model":str}`）**、各后端是否配好 Key、项目列表、是否需要 token |
 | `/api/run` | POST `{goal, provider, project}` | 提交生产任务 → `{run_id}` |
 | `/api/stream?run_id=&token=` | GET (SSE) | 实时事件流（先回放已落盘事件，再推送新事件） |
 | `/api/run/<id>` | GET | 全量事件 + `status: running\|done`（**状态看事件里有没有 run.done，不靠最后一条**） |
@@ -124,7 +124,7 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 用真实客户端流程跑过一遍（`/tmp/hxmv_client_e2e.py`，等价于 HxSync 会做的调用序列）：
 
 ```
-① /api/health → hxmv 0.6.0 | ffmpeg=true | 项目 ['柯基短剧'] | needs_token=true | notify=true
+① /api/health → hxmv 0.6.0 | ffmpeg=true | vision={ready,model} | 项目 ['柯基短剧'] | needs_token=true | notify=true
 ② POST /api/run {goal, provider: local, project: 柯基短剧} → run_id
 ③ 轮询 /api/run/<id> → 10s 完成 6 项、6 次尝试全一次过（项目档案命中 → 复用旧画面）
 ④ 收到服务端主动推送 → 5 个产物（成片/2 镜头/2 参考图）带公网可下载 URL

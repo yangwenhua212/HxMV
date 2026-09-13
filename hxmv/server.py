@@ -299,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             # 只会一律报"连不上"。项目名这类信息只有带令牌才给。
             authed = self._authed()
             from .media import probe
-            from .core import config
+            from .core import config, llm
             from . import __version__ as _v
             from .core.project import Project
             projects = []
@@ -312,6 +312,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "name": "hxmv", "version": _v, "server": self.server_version,
                 "ffmpeg": probe.has_ffmpeg(),
                 "encoder": probe.encoder_name() if probe.has_ffmpeg() else None,
+                # 视觉评审是否真的开着（L2 身份判定 / L3 语义评审靠它；没开=结果里会标注未做视觉检查）
+                "vision": {"ready": llm.vision_available(), "model": llm.vision_model()},
                 "providers": {name: {"ready": True if name == "mock" or name == "local"
                                      else config.configured(name)}
                               for name in PROVIDERS},

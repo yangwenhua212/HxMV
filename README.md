@@ -17,7 +17,7 @@
 
 > **HxMV 是一人一实例的 AI——谁部署它，谁就是它唯一的主人。**
 > 像把一个 AI 部署到自己服务器：出生是一张白纸（零记忆），大脑（`~/.hxmv/brain.json`）
-> 只存在你自己的机器上。它只为你积累经验、只学你的偏好、只听你的指令，越用越懂你。
+> 只存在你自己的机器上。它只为你积累经验、只学你的偏好、只听你的指令——记忆是**本地规则与参数积累**（不是模型微调）。
 > 别人想用 HxMV？那就自己部署一个——每个实例从零开始，只属于它的主人。
 > **没有中心账号、没有云端大脑：部署即拥有，隔离是天然的。**
 
@@ -44,7 +44,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/state.py` | Task / ExecutionState / Budget——LLM 与代码之间的结构化契约 |
 | `core/planner.py` | LLM 规划（OpenAI 兼容端点）；失败自动降级内置 Mock 规划。两种规划都**带着大脑记忆起手** |
 | `core/executor.py` | Mock 执行器：按参数概率注入真实感缺陷（物理/一致性缺陷概率都与参数挂钩，可被修好） |
-| `core/critic.py` | **三层 Critic**：L1 物理 / L2 视觉(一致性) / L3 语义(LLM 可选)，合并为 QualityReport |
+| `core/critic.py` | **三层 Critic**：L1 物理（ffmpeg 实测）/ L2 视觉（抽帧 + 视觉模型判身份）/ L3 语义（抽帧 + 视觉模型判分镜），合并为 QualityReport |
 | `media/probe.py` | **真眼睛（v0.4）**：ffprobe/ffmpeg 从**真实媒体**里量出分辨率/帧率/时长/音量/黑帧/静止/外观一致度 |
 | `core/refiner.py` | 按 failures→suggestions 调参重投；**优先查质量记忆里的历史成功修正** |
 | `core/controller.py` | 判定 PASS/RETRY/FAIL；PASS 时把验证有效的修正回写质量记忆 |
@@ -62,7 +62,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 |---|---|---|
 | 控制闭环（规划/执行/观察/判断/修正） | **真** | 每轮推进都改 state，可审计可回放 |
 | 产物 | **真** | `local` provider 用 FFmpeg 真渲染 mp4/png 到磁盘，能播放；`kling` 等接真实生成服务 |
-| 质量检测 | **真测量** | L1 用 ffprobe 量分辨率/帧率/时长/音量、blackdetect 量黑帧、freezedetect 量静止；L2 与参考图做**真像素**外观比对（16×16 感知指纹） |
+| 质量检测 | **真测量 + 真看图** | L1 用 ffprobe 量分辨率/帧率/时长/音量、blackdetect 量黑帧、freezedetect 量静止；**L2 抽 3 帧真画面 + 参考图**交给视觉模型判「是不是同一个角色/场景」；**L3 抽 4 帧真画面**判「符不符合分镜」。没配 `HXMV_VLM_MODEL` 时 L2 退回 16×16 像素一致度、L3 退回文字判断，并在报告里明写「未做视觉检查」 |
 | 修正是否有效 | **真因果** | 参数→可测指标的映射是真的：升分辨率→量出高度变化；加增益→量出音量变化；提参考强度→量出外观一致度变化 |
 | AI 生成模型 | **不是** | `local` 是 **FFmpeg 合成的仿真生成器**，用来在没有付费生成 API 时端到端验证"真产物+真检测"。画面是合成图案，不是 AI 画的 |
 
@@ -88,7 +88,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 ——下次起手就按量出来好用的参数走，试错次数直接砍半。
 
 **质量记忆**（跨镜头复用）：每个失败原因记录"哪个修正方向被验证成功过"，
-后续同类失败优先复用——系统越用越懂自家生成器的脾气。这是项目壁垒，不是套壳。
+后续同类失败优先复用。这是**工程机制**（架构一周能仿），会变厚的是**积累量**：被验证过的修正、失败样本、基准跑分。
 
 **项目档案（v0.5）——"记得这一系列的生成"**，做动画短剧这类连续作品的关键：
 
@@ -138,11 +138,16 @@ python3 -m hxmv --provider zhipu --project 柯基短剧 --episode 1 "第1集：�
 HXMV_PROVIDER=fake python3 -m hxmv "雪地里的柯基"
 # HXMV_PROVIDER=kling HXMV_KLING_KEY=sk-xxx python3 -m hxmv "..."   # 真实服务
 
-# 接真 LLM（Planner 规划 + L3 语义评审自动启用；失败自动降级）
+# 接真 LLM（Planner 规划自动启用；失败自动降级 Mock）
 export OPENAI_API_KEY=sk-xxx
 export OPENAI_BASE_URL=https://api.deepseek.com/v1   # 任意 OpenAI 兼容端点
 export HXMV_LLM_MODEL=deepseek-chat
 python3 -m hxmv "30 秒产品宣传片，现代极简风"
+
+# 再开「真看图」（L2 身份判定 + L3 语义评审）：**必须单独指定视觉模型**
+# （主 LLM 多半是纯文本模型，把图发过去只会被忽略还答得一本正经）
+export HXMV_VLM_MODEL=glm-4v-flash      # 智谱视觉版，或 gpt-4o-mini 等
+python3 -m hxmv --doctor               # 看「视觉评审（L2/L3 真看图）」那一项是否 ✅
 ```
 
 标准库 only，Python 3.10+；`ffmpeg`/`ffprobe` 是**可选**运行时依赖（只用 `local` provider 与真检测时需要，没装就自动回落 Mock 世界）。
@@ -172,7 +177,7 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - **V0.4** ✅ 真产物 + 真眼睛：FFmpeg 真渲染 + ffprobe 真测量 + 真像素一致性 + 参数学到的经验起手
 - **V0.5** ✅ 项目档案：风格/角色/已生成画面跨 run 记忆 + 剧情身份复用（续做不重画），Web 端可指定项目
 - **V0.6** ✅ 真 AI 视频接入：智谱 CogVideoX-Flash（免费）文/图生视频 + 角色参考图当首帧 + Key 本地配置（`--set-key`）+ 仿真端点自测
-- **V0.7** 📋 资产一致性深化（角色参考图版本管理、跨镜头锁脸、视觉模型抽帧比对）、checkpoint 人工审批点（高成本高主观产物必须有人把关）
+- **V0.7** 🚧 **真视觉闭环 ✅**（L2 抽帧身份判定 + L3 抽帧语义评审，配 `HXMV_VLM_MODEL` 生效；未配则如实标注未做视觉检查）；资产一致性深化（参考图版本管理、跨镜头锁脸）、checkpoint 人工审批点 📋
 - **V0.8** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
 ## 设计文档

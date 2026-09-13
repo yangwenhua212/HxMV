@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 # ---------- 判据阈值（真实世界的经验值；按需调这一张表） ----------
 THRESHOLDS = {
@@ -282,6 +283,43 @@ def appearance_consistency(media: str, reference: str, at_ratio: float = 0.5,
         return None
     diff = math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
     return round(1.0 - diff / math.sqrt(len(a) * 255 * 255), 4)
+
+
+# ---------- 真抽帧：给「会看图的眼睛」用（L2 身份 / L3 语义） ----------
+
+def extract_frames(path: str, count: int = 4, max_edge: int = 512,
+                   out_dir: str | None = None) -> tuple[str, list[str]]:
+    """从媒体里等距抽 count 张 JPEG 帧，返回 `(临时目录, 帧路径列表)`。
+
+    给 L2（参考图 vs 真帧的身份比对）和 L3（把真画面喂视觉模型）用。
+    纯读操作：不改产物、不写进产物目录；默认落系统临时目录，用完调 `cleanup_frames`。
+    采样点落在 [5%, 95%] 区间：避开片头黑场与片尾收尾帧。
+    """
+    if count < 1 or not has_ffmpeg() or not is_media_file(path):
+        return "", []
+    container = probe_container(path) or {}
+    duration = container.get("duration") or 0.0
+    tmp = out_dir or tempfile.mkdtemp(prefix="hxmv_frames_")
+    os.makedirs(tmp, exist_ok=True)
+    if duration and duration > 0.2:
+        step = (0.95 - 0.05) / max(count - 1, 1)
+        stamps = [duration * (0.05 + step * i) for i in range(count)]
+    else:
+        stamps = [0.0]
+    frames: list[str] = []
+    for i, at in enumerate(stamps):
+        dest = os.path.join(tmp, f"f{i}.jpg")
+        rc, _ = _run(["ffmpeg", "-v", "error", "-y", "-ss", f"{at:.3f}", "-i", path,
+                      "-frames:v", "1", "-vf", f"scale={max_edge}:-2", "-q:v", "4", dest])
+        if rc == 0 and os.path.exists(dest) and os.path.getsize(dest) > 0:
+            frames.append(dest)
+    return tmp, frames
+
+
+def cleanup_frames(tmp: str) -> None:
+    """删掉 extract_frames 造的临时目录（失败也不抛）。"""
+    if tmp:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------- 汇总：一次测量 → 指标 + 缺陷 ----------

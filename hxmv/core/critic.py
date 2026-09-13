@@ -17,6 +17,9 @@ v0.4 升级：\"眼睛\"分两条路，自动选路——
 """
 from __future__ import annotations
 
+import json
+import re
+
 from ..media import probe
 from ..quality import QualityReport
 from .state import (
@@ -26,6 +29,7 @@ from .state import (
 from . import llm
 
 # 缺陷 → 可执行修正建议（Code 消费，非给人看的自由文本）
+# 建议名必须是 refiner._ADJUST 里的键（否则 Refiner 调不动 → 任务直接终态 FAIL）
 DEFECT_FIXES = {
     "black_frame":      ("trim_black_frames", "黑帧：裁掉/去掉片头黑场"),
     "low_clarity":      ("increase_resolution", "清晰度不足：提高分辨率或码率"),
@@ -38,12 +42,40 @@ DEFECT_FIXES = {
     "character_inconsistency": ("increase_reference_strength", "角色不一致：加强角色参考强度/换参考帧"),
     "scene_inconsistency":     ("increase_reference_strength", "场景不一致：锁定场景参考"),
     "semantic_mismatch": ("rewrite_prompt_closer", "与剧本不符：改写 prompt 使其贴合分镜描述"),
+    # L3 视觉评审的四类语义失败（真看图之后才会出现；修正方向都落在既有旋钮上）
+    "character_mismatch": ("increase_reference_strength", "画面里的人不是该角色：加强角色参考强度/换参考帧"),
+    "action_mismatch":    ("rewrite_prompt_closer", "动作与分镜不符：改写 prompt 写明动作"),
+    "emotion_wrong":      ("rewrite_prompt_closer", "情绪与分镜不符：改写 prompt 补情绪与氛围"),
+    "plot_break":         ("rewrite_prompt_closer", "与前后镜头不连续：改写 prompt 补衔接"),
 }
 
 # 每层扣分权重（物理最致命——黑帧直接废片）
 _LAYER_PENALTY = {"L1_PHYSICS": 0.35, "L2_VISUAL": 0.30, "L3_SEMANTIC": 0.25}
 # 单层内每个缺陷的扣分（封顶该层权重）
 _PENALTY_PER_DEFECT = 0.15
+
+
+def _parse_json(text: str) -> dict | None:
+    """宽容解析评审模型返回的 JSON：容忍 ```json 围栏与前后多余文字。
+
+    解析不出来返回 None —— 调用方据此判定「这次评审没有可信结论」，退回兜底路径，
+    绝不用残缺结果冒充判定。
+    """
+    if not text:
+        return None
+    cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    candidates = [cleaned]
+    match = re.search(r"\{.*\}", cleaned, flags=re.S)
+    if match:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 class Critic:
@@ -90,13 +122,24 @@ class L1PhysicsCritic(Critic):
 
 
 class L2VisualCritic(Critic):
-    """视觉层：一致性。
+    """视觉层：一致性（角色/场景）。
 
-    真媒体 + 参考图 → 与参考图的**外观一致度**（缩略图 RGB 距离，真像素）；
-    否则 → 读注入的一致性标签（V0.1 mock 路径）。
+    **有视觉模型 → 真帧 vs 参考图的身份判定**：抽 3 帧真画面 + 参考图一起交给视觉模型，
+    问的是「是不是同一个角色/同一个场景」而不是「像素差多少」——对运镜、光照、压缩不敏感，
+    这正是像素距离做不到的那一步。
+    **没有视觉模型 → 退回已标定的 RGB 外观一致度阈值**（旧行为），detail 里如实标明「未做身份检查」。
     """
 
     layer = "L2_VISUAL"
+    FRAMES = 3
+
+    SYSTEM = (
+        "你是 HxMV 的 L2 一致性评审。第一张图是基准参考，后面几张来自同一镜头的实际画面。\n"
+        "只判断两件事：① 后面每帧里的主体是不是参考里的**同一个角色**；"
+        "② 是不是**同一个场景**。\n"
+        "换个角度、远近、光照、压缩画质都不算不一致；换人/换景/换服装才算。\n"
+        '只输出 JSON：{"same_character": true, "same_scene": true, "reason": "一句话"}。'
+    )
 
     def evaluate(self, task: Task, result: dict) -> QualityReport:
         if task.action != ACTION_GENERATE_SHOT:
@@ -109,9 +152,15 @@ class L2VisualCritic(Critic):
         consistency = probe.appearance_consistency(
             media, ref, at_ratio=0.5 if at_ratio is None else float(at_ratio)) if (media and ref) else None
         if consistency is not None:
-            result["consistency"] = consistency            # 供面板/审计：与参考图的一致度
+            result["consistency"] = consistency
+
+        verdict = self._identity_review(task, result, media, ref)
+        if verdict is not None:
+            return verdict
+
+        if consistency is not None:
             thr = probe.THRESHOLDS["min_consistency"]
-            detail = f"与参考图外观一致度 {consistency:.3f}（阈值 {thr}）"
+            detail = f"与参考图外观一致度 {consistency:.3f}（阈值 {thr}）· 未做身份检查（无视觉模型）"
             if consistency >= thr:
                 return QualityReport(layer=self.layer, score=consistency, detail=detail)
             defect = ("character_inconsistency" if "character" in task.constraints
@@ -124,38 +173,140 @@ class L2VisualCritic(Critic):
                   if d in ("character_inconsistency", "scene_inconsistency")]
         return self._report(visual)
 
+    def _identity_review(self, task: Task, result: dict, media: str, ref: str) -> QualityReport | None:
+        """真帧 + 参考图交给视觉模型判身份。不可用/失败返回 None（调用方退回像素路径）。"""
+        if not llm.vision_available():
+            return None
+        if not (probe.is_media_file(media) and probe.is_media_file(ref)):
+            return None
+        tmp, frames = probe.extract_frames(media, count=self.FRAMES)
+        try:
+            if not frames:
+                return None
+            text = (f"第一张图 = 基准参考；后面 {len(frames)} 张 = 本镜头实际画面（按时间顺序）。"
+                    f"判断主体角色与场景是否与参考一致。")
+            who = task.constraints.get("character") or task.constraints.get("characters")
+            if who:
+                text += f"参考角色：{who}。"
+            data = _parse_json(llm.chat_vision(self.SYSTEM, text, [ref] + frames))
+            if data is None:
+                return None
+            same_char = bool(data.get("same_character", True))
+            same_scene = bool(data.get("same_scene", True))
+            result["identity_review"] = {
+                "model": llm.vision_model(), "frames": len(frames),
+                "same_character": same_char, "same_scene": same_scene,
+                "reason": str(data.get("reason", ""))[:200],
+                "pixel_consistency": result.get("consistency"),
+            }
+            defects: list[str] = []
+            if not same_char:
+                defects.append("character_inconsistency")
+            if not same_scene:
+                defects.append("scene_inconsistency")
+            detail = (f"视觉身份判定（参考 + {len(frames)} 帧）："
+                      f"角色{'一致' if same_char else '不一致'} / 场景{'一致' if same_scene else '不一致'}")
+            if result.get("consistency") is not None:
+                detail += f" · 像素一致度 {result['consistency']:.3f}（遥测）"
+            return self._report(defects, detail=detail)
+        except Exception as exc:  # 视觉模型挂了不能拖垮闭环：退回像素路径
+            result["identity_review"] = {"error": str(exc)[:160]}
+            return None
+        finally:
+            probe.cleanup_frames(tmp)
+
 
 class L3SemanticCritic(Critic):
-    """语义层：剧本符合度/情绪/连续性。有 LLM 用 LLM 看，没有就规则兜底。"""
+    """语义层：剧本符合度/情绪/连续性。
+
+    **有视觉模型 → 真抽帧喂视觉模型**（从产物里抽 4 帧真画面，连同分镜描述一起交给它看）——
+    这才是语义闭环成立的前提。
+    **没有视觉模型 → 退回文字判断**（旧行为），并在 detail 里写明「未做视觉检查」，
+    绝不冒充看过画面。
+    """
 
     layer = "L3_SEMANTIC"
+    FRAMES = 4
 
     SYSTEM = (
-        "你是 HxMV 的 L3 语义评审。给出一段分镜描述和生成结果的说明，判断是否符合剧本意图。\n"
-        '只输出 JSON：{"failures": [], "score": 0.9}，score 0-1。'
-        "仅在明显不符合（主角/场景/情绪/动作对不上剧本）时填 failures，如 character_mismatch / action_mismatch / emotion_wrong / plot_break。"
+        "你是 HxMV 的 L3 语义评审，会拿到**真实抽帧**和分镜描述。\n"
+        "逐条判断画面是否符合分镜：角色对不对、动作对不对、情绪对不对、与前后镜头连不连续。\n"
+        '只输出 JSON：{"failures": [], "score": 0.9, "reason": "一句话"}，score 0-1。\n'
+        "failures 只填**确实对不上**的项，取值限定：character_mismatch / action_mismatch / "
+        "emotion_wrong / plot_break；都对得上就留空数组。"
+    )
+
+    # 没配视觉模型时的兜底提示词：**没有图**，只能看文字说明（别让它以为看过画面）
+    SYSTEM_TEXT = (
+        "你是 HxMV 的 L3 语义评审。只给你分镜描述和生成结果的说明文字（**没有画面**），"
+        "判断是否符合剧本意图。\n"
+        '只输出 JSON：{"failures": [], "score": 0.9}，score 0-1。\n'
+        "仅在明显不符合（主角/场景/情绪/动作对不上剧本）时填 failures，取值："
+        "character_mismatch / action_mismatch / emotion_wrong / plot_break。"
     )
 
     def evaluate(self, task: Task, result: dict) -> QualityReport:
         defects = result.get("defects", [])
         semantic = [d for d in defects if d == "semantic_mismatch"]
-        if not semantic and llm.llm_available() and task.action == ACTION_GENERATE_SHOT:
+        if task.action != ACTION_GENERATE_SHOT:
+            return self._report(semantic)
+
+        prompt = task.input.get("prompt", "")
+        visual = self._visual_review(task, result, prompt)
+        if visual is not None:
+            return visual
+        return self._text_review(task, result, prompt)
+
+    def _visual_review(self, task: Task, result: dict, prompt: str) -> QualityReport | None:
+        """真抽帧 → 视觉模型。不可用/失败返回 None（调用方退回文字路径）。"""
+        if not llm.vision_available():
+            return None
+        media = result.get("media")
+        if not probe.is_media_file(media):
+            return None
+        tmp, frames = probe.extract_frames(media, count=self.FRAMES)
+        try:
+            if not frames:
+                return None
+            text = (f"分镜描述：{prompt}\n"
+                    f"附 {len(frames)} 张按时间顺序抽取的真实画面帧，请据此判断是否符合分镜。")
+            data = _parse_json(llm.chat_vision(self.SYSTEM, text, frames))
+            if data is None:
+                return None
+            raw_fail = data.get("failures", [])
+            fail = [f for f in raw_fail if isinstance(f, str) and f in DEFECT_FIXES][:4]
+            result["vision_review"] = {
+                "model": llm.vision_model(), "frames": len(frames),
+                "failures": fail, "score": data.get("score"),
+                "reason": str(data.get("reason", ""))[:200],
+            }
+            detail = f"视觉评审（{len(frames)} 帧真画面）· 分镜符合度 {data.get('score', '?')}"
+            return self._report(fail, detail=detail)
+        except Exception as exc:  # 视觉模型挂了不能拖垮闭环：退回文字路径
+            result["vision_review"] = {"error": str(exc)[:160]}
+            return None
+        finally:
+            probe.cleanup_frames(tmp)
+
+    def _text_review(self, task: Task, result: dict, prompt: str) -> QualityReport:
+        """旧行为：把 result 里的**文字**交给 LLM（没看图）。detail 里如实标注。"""
+        defects = result.get("defects", [])
+        semantic = [d for d in defects if d == "semantic_mismatch"]
+        if not semantic and llm.llm_available():
             try:
-                prompt = task.input.get("prompt", "")
                 text = llm.chat([
-                    {"role": "system", "content": self.SYSTEM},
+                    {"role": "system", "content": self.SYSTEM_TEXT},
                     {"role": "user", "content": f"分镜: {prompt}\n结果说明: {result}"},
                 ], temperature=0.0, max_tokens=200)
-                import json
-                import re
-                data = json.loads(re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.M))
-                fail = data.get("failures", [])
-                score = max(0.0, min(1.0, float(data.get("score", 1.0))))
-                return QualityReport(layer=self.layer, score=score, failures=fail,
-                                     suggestions=[f"rewrite_prompt_closer:{f}" for f in fail])
+                data = _parse_json(text)
+                if data is not None:
+                    fail = [f for f in data.get("failures", [])
+                            if isinstance(f, str) and f in DEFECT_FIXES][:4]
+                    return self._report(
+                        fail, detail=f"文字判断（未配视觉模型，没看图）· 自评 {data.get('score', '?')}")
             except Exception:
                 pass  # LLM 不稳时用规则兜底，保证 Critic 永远可跑
-        return self._report(semantic)
+        return self._report(semantic, detail="未做视觉检查（无视觉模型）")
 
 
 class PipelineCritic:
@@ -163,10 +314,21 @@ class PipelineCritic:
 
     def __init__(self):
         self.layers: list[Critic] = [L1PhysicsCritic(), L2VisualCritic(), L3SemanticCritic()]
+        self._cache_key: tuple | None = None
+        self._cache: list[QualityReport] = []
 
     def evaluate_layers(self, task: Task, result: dict) -> list[QualityReport]:
-        """逐层评估，返回每层独立报告（客户端/面板展示分层分数用）。"""
-        return [layer.evaluate(task, result) for layer in self.layers]
+        """逐层评估，返回每层独立报告（客户端/面板展示分层分数用）。
+
+        **同一轮检测只跑一次**：闭环先调 `evaluate()` 拿判定、紧接着调 `evaluate_layers()`
+        拿分层展示——两层各跑一遍会让视觉模型被请求两次（费用/延迟翻倍，且随机的
+        VLM 可能给出与判定不一致的分层分数）。这里按 (任务, attempt, result 实例) 记住结果。
+        """
+        key = (task.task_id, task.retry_policy.get("attempts"), id(result))
+        if key != self._cache_key:
+            self._cache = [layer.evaluate(task, result) for layer in self.layers]
+            self._cache_key = key
+        return self._cache
 
     def evaluate(self, task: Task, result: dict) -> QualityReport:
         merged = QualityReport(layer="PIPELINE", score=1.0)
