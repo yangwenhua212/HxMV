@@ -54,6 +54,33 @@ def set_api_key(provider: str, key: str) -> str:
     return mask(key)
 
 
+# 非凭据类配置（模型档位这种）的环境变量名：沿用已存在的名字，别让同一个东西有两个变量
+_ENV_OPTIONS = {
+    ("zhipu", "video_model"): "HXMV_ZHIPU_MODEL",
+    ("zhipu", "vlm_model"): "HXMV_VLM_MODEL",
+}
+
+
+def option(provider: str, name: str) -> str:
+    """读 provider 的非凭据配置（模型档位等）：环境变量 → 配置文件 → 空串。"""
+    env = _ENV_OPTIONS.get((provider, name), f"HXMV_{provider.upper()}_{name.upper()}")
+    if os.environ.get(env):
+        return os.environ[env].strip()
+    val = (load().get("providers", {}).get(provider, {}) or {}).get(name, "")
+    return str(val).strip()
+
+
+def set_option(provider: str, name: str, value: str) -> None:
+    """写 provider 的非凭据配置；空值 = 删掉该项（回到默认档位）。"""
+    data = load()
+    book = data.setdefault("providers", {}).setdefault(provider, {})
+    if value.strip():
+        book[name] = value.strip()
+    else:
+        book.pop(name, None)
+    save(data)
+
+
 def mask(key: str) -> str:
     key = (key or "").strip()
     if len(key) <= 10:

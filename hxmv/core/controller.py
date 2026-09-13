@@ -55,10 +55,13 @@ class Controller:
 
         task.status = TaskStatus.FAIL
         state.failed.append(task)
+        # 区分两种终态：预算真的耗尽 vs 已经没有可调参数（后者要继续跑也只是重复同一件事）
+        exhausted = attempts >= max_attempts
+        why = f"{attempts+1} 次尝试耗尽" if exhausted else "已无参数可调，提前收手"
         state.observations.append(
             {"task_id": task.task_id, "report": report,
-             "note": f"{task.action} 终态 FAIL（{attempts+1} 次尝试耗尽）score={report.score:.2f}"})
-        state.log(f"❌ {task.action} {task.task_id} 终态 FAIL（尝试耗尽）")
+             "note": f"{task.action} 终态 FAIL（{why}）score={report.score:.2f}"})
+        state.log(f"❌ {task.action} {task.task_id} 终态 FAIL（{why}）")
         return "FAIL"
 
     def _remember_success(self, state: ExecutionState, task: Task, report) -> None:

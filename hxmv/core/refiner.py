@@ -106,6 +106,11 @@ class Refiner:
             chosen.append((f, hint if hint else s))
         chosen = chosen[:MAX_FIXES]
 
+        # 一条都调不动 = 这个失败已经修无可修（例如 reference_strength 已在 1.0）。
+        # 返回 None 让 Controller 提前收手——实测不然会拿同一套参数烧满 30 次预算。
+        if not chosen:
+            return None
+
         new_task = task.child()
         notes, applied = [], []
         for f, s in chosen:

@@ -29,6 +29,8 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 | `/api/runs` | GET | 制片历史摘要列表 |
 | `/api/brain` | GET | 大脑条目（做过什么、学到什么） |
 | `/api/artifact?run_id=&name=` | GET | 取产物字节（mp4/png，`Content-Disposition: inline`） |
+| `/api/config` | GET | **接口配置状态**（面板设置页用）：各 provider 是否配好 Key（只回**脱敏**串，明文永不回传）、`options.video_model`／`options.vlm_model` 当前档位、`vision{ready,model}` |
+| `/api/config` | POST `{provider,key?,video_model?,vlm_model?}` | **保存接口配置**（写入实例本机 `~/.hxmv/config.json`，600）。Key 不回传；档位保存后**立即生效**，不用重启 |
 | `/dl/<文件名>` | GET | 分发包下载（客户端安装包等，放 `~/.hxmv/dl/`；公开、免 token、支持断点续传） |
 
 **认证**：`X-Hxmv-Token` 头（或 `?token=`，SSE 只能用 query）。健康检查也需要 token（除非服务端没设 `HXMV_WEB_TOKEN`）。

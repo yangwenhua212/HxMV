@@ -275,12 +275,24 @@ class L3SemanticCritic(Critic):
                 return None
             raw_fail = data.get("failures", [])
             fail = [f for f in raw_fail if isinstance(f, str) and f in DEFECT_FIXES][:4]
+            score = data.get("score")
+            # 低分却没点名缺陷 → **不许当成通过**（实测 GLM-4V-Flash 会回
+            # score=0.0 + failures=[]，描述写"没有柯基犬"）。这是最阴的假通过，
+            # 必须落一个能驱动修正的失败键，把判定交给闭环。
+            try:
+                low = float(score) < float(task.quality.get("min_score", 0.8))
+            except (TypeError, ValueError):
+                low = False
+            if low and not fail:
+                fail = ["semantic_mismatch"]
             result["vision_review"] = {
                 "model": llm.vision_model(), "frames": len(frames),
-                "failures": fail, "score": data.get("score"),
+                "failures": fail, "score": score,
                 "reason": str(data.get("reason", ""))[:200],
             }
-            detail = f"视觉评审（{len(frames)} 帧真画面）· 分镜符合度 {data.get('score', '?')}"
+            detail = f"视觉评审（{len(frames)} 帧真画面）· 分镜符合度 {score}"
+            if low and fail == ["semantic_mismatch"]:
+                detail += "（低分且未点名缺陷 → 记语义不符）"
             return self._report(fail, detail=detail)
         except Exception as exc:  # 视觉模型挂了不能拖垮闭环：退回文字路径
             result["vision_review"] = {"error": str(exc)[:160]}

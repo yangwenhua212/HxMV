@@ -156,29 +156,99 @@ class LLMPlanner(Planner):
         '{"action": "GENERATE_SHOT|GENERATE_CHARACTER|GENERATE_SCENE|STORYBOARD|COMPOSE", '
         '"input": {"prompt": "...", "duration": 5}, "constraints": {"style": "cinematic", '
         '"character": "主角键"}, "quality": {"min_score": 0.82}}。\n'
+        "硬要求（缺了计划就作废）：\n"
+        "① 必须至少有一个 GENERATE_SHOT（成片的画面只能来自镜头，没有镜头就出不了片）；\n"
+        "② 每个 GENERATE_SHOT 的 constraints 必须带 character 和 scene（执行器靠它们找参考图）；\n"
+        "③ 结尾必须有 COMPOSE 把镜头拼成 final.mp4。\n"
         "不要输出任何 JSON 以外的文字。动作全部大写。"
     )
+
+    # 模型输出的约束键别名 → 内部键。LLM 规划是自由的，字段名/漏字段都是常态。
+    _CONS_ALIASES = {
+        "character_name": "character", "character_key": "character", "asset_key": "character",
+        "主角": "character", "角色": "character", "人物": "character",
+        "scene_name": "scene", "scene_key": "scene", "场景": "scene", "背景": "scene",
+    }
+    _ACTIONS = (ACTION_STORYBOARD, ACTION_GENERATE_CHARACTER, ACTION_GENERATE_SCENE,
+                ACTION_GENERATE_SHOT, ACTION_COMPOSE)
 
     def __init__(self, brain=None, project=None):
         self._brain = brain
         self.project = project
 
+    def _normalize(self, raw) -> list[Task]:
+        """把模型给的 JSON 收拾成**可执行**的任务数组。
+
+        实测坑（配上真 Key 后才暴露）：模型会漏掉 `constraints.character`，
+        而执行器拿不到参考资产就抛**不可重试**错误 → 整条镜头直接终态 FAIL。
+        所以这里做三件事：① 只保留已知动作；② 约束键别名归一；
+        ③ 镜头缺 character/scene 时，用同一份计划里的角色/场景任务补齐，
+        补不上再用项目档案里已有的键；④ 有镜头没成片时补一个 COMPOSE。
+        """
+        items = [t for t in (raw if isinstance(raw, list) else [raw])
+                 if isinstance(t, dict) and t.get("action") in self._ACTIONS]
+
+        char_key = scene_key = None
+        for t in items:
+            cons = t.get("constraints") if isinstance(t.get("constraints"), dict) else {}
+            inp = t.get("input") if isinstance(t.get("input"), dict) else {}
+            if t["action"] == ACTION_GENERATE_CHARACTER:
+                char_key = cons.get("asset_key") or cons.get("character") or inp.get("prompt")
+            elif t["action"] == ACTION_GENERATE_SCENE:
+                scene_key = cons.get("scene_key") or cons.get("scene") or inp.get("prompt")
+        if self.project:
+            char_key = char_key or next(iter(self.project.characters), None)
+            scene_key = scene_key or next(iter(self.project.scenes), None)
+
+        tasks: list[Task] = []
+        for t in items:
+            raw_cons = t.get("constraints") if isinstance(t.get("constraints"), dict) else {}
+            cons = {self._CONS_ALIASES.get(k, k): v for k, v in raw_cons.items()}
+            if t["action"] == ACTION_GENERATE_SHOT:
+                cons.setdefault("character", char_key)
+                cons.setdefault("scene", scene_key)
+                cons = {k: v for k, v in cons.items() if v}
+            tasks.append(Task(
+                action=t["action"],
+                input=t.get("input") if isinstance(t.get("input"), dict) else {},
+                constraints=cons,
+                quality=t.get("quality") if isinstance(t.get("quality"), dict) else {},
+            ))
+
+        # 有镜头没成片 → 补一个 COMPOSE（shots 留空 = 拼接本次全部镜头）
+        if tasks and not any(t.action == ACTION_COMPOSE for t in tasks) \
+                and any(t.action == ACTION_GENERATE_SHOT for t in tasks):
+            tasks.append(Task(action=ACTION_COMPOSE, input={"shots": [], "output": "final.mp4"}))
+        return tasks
+
+    def _plan(self, state: ExecutionState) -> list[Task] | None:
+        """问一次模型，返回**校验过**的任务数组；不合格返回 None（由工厂降级 MockPlanner）。
+
+        校验为什么不省：模型会给出"看着像计划、其实出不了片"的数组——实测两次踩到
+        （漏 constraints.character → 镜头终态 FAIL；干脆没排 GENERATE_SHOT → COMPOSE 没料可拼）。
+        真 AI 路径必须**要么出片、要么老实降级**，不能把一份空计划跑成红。
+        """
+        memory_block = self._brain.inject(query=state.goal) if self._brain else ""
+        project_block = self.project.inject() if self.project else ""
+        blocks = "\n\n".join(b for b in (project_block, memory_block) if b)
+        system = self.SYSTEM + ("\n" + blocks if blocks else "")
+        text = llm.chat([
+            {"role": "system", "content": system},
+            {"role": "user", "content": state.goal},
+        ], temperature=0.2)
+        array = json.loads(re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.M))
+        tasks = self._normalize(array)
+        if not any(t.action == ACTION_GENERATE_SHOT for t in tasks):
+            return None
+        return tasks
+
     def next_task(self, state: ExecutionState) -> Task | None:
         if state.phase == "PLAN" and not state.tasks:
             try:
-                memory_block = self._brain.inject(query=state.goal) if self._brain else ""
-                project_block = self.project.inject() if self.project else ""
-                blocks = "\n\n".join(b for b in (project_block, memory_block) if b)
-                system = self.SYSTEM + ("\n" + blocks if blocks else "")
-                text = llm.chat([
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": state.goal},
-                ], temperature=0.2)
-                array = json.loads(re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.M))
-                state.tasks = [Task(**{k: v for k, v in t.items() if k in
-                                       ("action", "input", "constraints", "quality")})
-                               for t in array]
-                state.phase = "RUN"
+                tasks = self._plan(state)
+                if tasks is None:
+                    return None
+                state.tasks, state.phase = tasks, "RUN"
             except Exception:
                 return None  # 降级由工厂处理
         for t in state.tasks:

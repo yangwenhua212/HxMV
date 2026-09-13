@@ -259,6 +259,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_err(500, f"面板文件缺失: {WEB_HTML}")
             return
 
+        if p == "/api/config":
+            # 接口配置（面板设置页用）：只回**脱敏**状态，明文 Key 永不回传
+            if not self._authed():
+                self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
+                return
+            from .core import config, llm
+            providers = []
+            for pid, name in (("zhipu", "智谱 AI"), ("kling", "可灵")):
+                k = config.api_key(pid)
+                providers.append({"id": pid, "name": name,
+                                  "configured": bool(k), "masked": config.mask(k) if k else ""})
+            self._send_json({
+                "providers": providers,
+                "options": {"video_model": config.option("zhipu", "video_model") or "cogvideox-flash",
+                            "vlm_model": config.option("zhipu", "vlm_model") or llm.ZHIPU_VISION_MODEL},
+                "vision": {"ready": llm.vision_available(), "model": llm.vision_model()},
+            })
+            return
+
         if p.startswith("/dl/"):
             # 分发包（客户端安装包等）：放固定目录、按文件名白名单取，防穿越。
             # 走 nginx 前面时不需要 token——这是公开的安装包，不是实例数据。
@@ -450,6 +469,25 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(HOOKS_DIR, name + ".jsonl"), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
             self._send_json({"ok": True})
+            return
+        if u.path == "/api/config":
+            # 保存接口配置（面板设置页用）。Key 只写进 ~/.hxmv/config.json(600)，不回传明文。
+            if not self._authed():
+                self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
+                return
+            from .core import config, llm
+            body = self._read_body()
+            provider = str(body.get("provider", "")).strip().lower()
+            if provider not in ("zhipu", "kling"):
+                self._send_err(400, "不支持的 provider")
+                return
+            if str(body.get("key", "")).strip():
+                config.set_api_key(provider, str(body["key"]))
+            for opt in ("video_model", "vlm_model"):
+                if opt in body:
+                    config.set_option(provider, opt, str(body.get(opt, "")))
+            self._send_json({"ok": True, "vision": {"ready": llm.vision_available(),
+                                                   "model": llm.vision_model()}})
             return
         if u.path != "/api/run":
             self._send_err(404, f"未知路径: {u.path}")

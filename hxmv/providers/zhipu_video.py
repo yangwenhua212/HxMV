@@ -86,7 +86,8 @@ class ZhipuVideoProvider(VideoProvider):
                 "未配置智谱 API Key（用 `python3 -m hxmv --set-key zhipu <KEY>` 或设 HXMV_ZHIPU_KEY）",
                 retryable=False)
         self.base = os.environ.get("HXMV_ZHIPU_BASE", DEFAULT_BASE).rstrip("/")
-        self.model = os.environ.get("HXMV_ZHIPU_MODEL", "cogvideox-flash")
+        # 档位来源：HXMV_ZHIPU_MODEL 环境变量 → ~/.hxmv/config.json（面板设置页可切）
+        self.model = config.option("zhipu", "video_model") or "cogvideox-flash"
         self.timeout = float(os.environ.get("HXMV_ZHIPU_TIMEOUT", "420"))
         self.outdir = outdir or os.environ.get("HXMV_ARTIFACTS") or (
             os.path.join(project.dir, "artifacts") if project else

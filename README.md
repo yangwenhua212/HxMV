@@ -54,7 +54,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `providers/zhipu_video.py` | **真 AI 视频（v0.6）**：智谱 CogVideoX-Flash（免费）文/图生视频，角色参考图当首帧锁角色 |
 | `core/config.py` | 本地凭据：`~/.hxmv/config.json`（权限 600），`--set-key` 一次配好，CLI 与 Web 共用 |
 | `providers/` | Provider 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
-| `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板 |
+| `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板（生产页 / **设置页**：接口配置与模型档位） |
 
 ### v0.4「真产物 + 真眼睛」：哪部分是真的
 
@@ -173,6 +173,7 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - 侧栏实时显示大脑沉淀（LESSON 升华），底部历史 run 点击即回放
 - 事件存档：`~/.hxmv/runs/<id>/events.jsonl`（可审计、可回放）
 - 公网：设 `HXMV_WEB_TOKEN` 后所有 `/api/*` 需 token（header 或 `?token=`），面板 URL 带一次即记住
+- **设置页**（顶部分页）直接配接口：粘贴智谱 / 可灵 Key、切视频模型档位（免费 / 付费）、切视觉评审档位，保存即生效——不用再命令行 `--set-key`，手机上也能配
 
 ## 路线
 
