@@ -65,6 +65,11 @@
   .refItem img { width: 104px; height: 62px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); display: block; background: var(--panel2); }
   .refItem b { display: block; font-size: 12px; font-weight: 500; color: var(--dim); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .refItem button { position: absolute; top: 3px; right: 3px; padding: 0 6px; font-size: 12px; line-height: 18px; border-radius: 6px; background: rgba(10,18,16,.8); color: var(--red); border: 1px solid var(--border); }
+  .batchHint { font-size: 13px; color: var(--dim); margin: 10px 0 6px; }
+  .batchRow { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .batchRow .fname { flex: 0 1 40%; font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .batchRow input { flex: 1; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; color: var(--text); font-size: 13px; min-width: 0; }
+  .batchRow button { padding: 3px 9px; font-size: 13px; border-radius: 8px; background: var(--panel2); border: 1px solid var(--border); color: var(--red); }
 
   /* 时间线 */
   .ev { border-left: 2px solid var(--border); padding: 1px 0 16px 18px; margin-left: 7px; position: relative; }
@@ -167,13 +172,14 @@
       </div>
       <div class="row">
         <label class="fileBtn" for="refFile">选图片</label>
-        <input id="refFile" type="file" accept="image/*" hidden>
+        <input id="refFile" type="file" accept="image/*" multiple hidden>
         <span id="refFileName"></span>
         <button id="refPreviewBtn">预览</button>
         <button id="refSaveBtn">存为参考图</button>
       </div>
       <div id="refHint"></div>
       <img id="refPreview" alt="">
+      <div id="refBatch"></div>
       <div class="refGrid" id="refList"></div>
     </div>
 
@@ -539,9 +545,9 @@ $("goalInput").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ct
 // ---------- 参考图（图生视频的首帧）：上传 → 自动裁主视觉 → 落进项目档案 ----------
 function refHint(msg, isErr) { $("refHint").textContent = (isErr ? "⚠ " : "✓ ") + msg; }
 function refProject() { return $("projectInput").value.trim(); }
-function refFileData() {
-  const f = $("refFile").files[0];
-  if (!f) return Promise.reject(new Error("先选一张图片"));
+// 选中的图片（支持一次多张）：{ file, key } —— key 是要填的键名（镜头里的角色名／场景名）
+let refSel = [];
+function fileData(f) {
   return new Promise((ok, no) => {
     const r = new FileReader();
     r.onload = () => ok(r.result);
@@ -549,13 +555,82 @@ function refFileData() {
     r.readAsDataURL(f);
   });
 }
+// 统一的 JSON 提交：网关/服务器回了非 JSON（比如体积超限的 413 HTML 页）时给人话，
+// 别把「Unexpected token '<'」甩到界面上
+async function postJson(path, body) {
+  const res = await hx(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const text = await res.text();
+  let d;
+  try { d = JSON.parse(text); }
+  catch (e) {
+    throw new Error(res.status === 413 ? "图片太大被网关拦下（HTTP 413）——换小一点的图，或先压一下再传"
+                                       : "服务器回了非 JSON 响应（HTTP " + res.status + "）");
+  }
+  if (d.error) throw new Error(d.error);
+  return d;
+}
+function baseName(n) { return String(n || "").replace(/\.[^.]+$/, "").trim(); }
+function refreshRefFileLabel() {
+  const n = refSel.length;
+  $("refFileName").textContent = n <= 1 ? (n ? refSel[0].file.name : "") : "已选 " + n + " 张";
+  $("refPreviewBtn").disabled = n !== 1;   // 预览只对单张有意义
+}
+function renderBatch() {
+  const box = $("refBatch");
+  box.innerHTML = "";
+  if (refSel.length <= 1) return;
+  const head = document.createElement("div");
+  head.className = "batchHint";
+  head.textContent = "选了 " + refSel.length + " 张：给每张起个名（镜头里用的角色名／场景名），再点下面一次存完";
+  box.appendChild(head);
+  refSel.forEach((it, i) => {
+    const row = document.createElement("div");
+    row.className = "batchRow";
+    const nm = document.createElement("span");
+    nm.className = "fname"; nm.textContent = it.file.name;
+    const inp = document.createElement("input");
+    inp.value = it.key; inp.placeholder = "名字";
+    inp.oninput = () => { it.key = inp.value; };
+    const rm = document.createElement("button");
+    rm.textContent = "×"; rm.title = "移除这张";
+    rm.onclick = () => { refSel.splice(i, 1); renderBatch(); refreshRefFileLabel(); };
+    row.appendChild(nm); row.appendChild(inp); row.appendChild(rm);
+    box.appendChild(row);
+  });
+  const btn = document.createElement("button");
+  btn.id = "refBatchBtn"; btn.textContent = "全部存为参考图";
+  btn.onclick = saveBatch;
+  box.appendChild(btn);
+}
+async function saveBatch() {
+  const pid = refProject();
+  if (!pid) { refHint("先在上面填项目名", true); return; }
+  const kind = $("refKind").value, mode = $("refMode").value, total = refSel.length;
+  const btn = $("refBatchBtn");
+  if (btn) btn.disabled = true;
+  let ok = 0, fail = 0, firstErr = "";
+  for (let i = 0; i < total; i++) {
+    const it = refSel[i], key = (it.key || "").trim();
+    if (!key) { fail++; firstErr = firstErr || "有图片还没起名"; continue; }
+    refHint("正在存第 " + (i + 1) + "/" + total + " 张：" + key + "…");
+    try {
+      await postJson("/api/ref", { project: pid, kind: kind, key: key, name: key, mode: mode,
+                                   preview: false, image: await fileData(it.file) });
+      ok++;
+    } catch (e) { fail++; firstErr = firstErr || (key + "：" + e.message); }
+  }
+  if (btn) btn.disabled = false;
+  refHint("批量完成：成功 " + ok + " 张" + (fail ? "，失败 " + fail + " 张 —— " + firstErr : ""), fail > 0);
+  refreshRef();
+}
 async function refPayload(preview) {
   const pid = refProject();
   if (!pid) throw new Error("先在上面填项目名");
   const key = $("refKey").value.trim();
   if (!preview && !key) throw new Error("填一个键名（镜头里的角色名／场景名）");
+  if (!refSel.length) throw new Error("先选一张图片");
   return { project: pid, kind: $("refKind").value, key: key, name: key,
-           mode: $("refMode").value, preview: !!preview, image: await refFileData() };
+           mode: $("refMode").value, preview: !!preview, image: await fileData(refSel[0].file) };
 }
 function hxUrl(path) { return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN); }
 async function refreshRef() {
@@ -591,9 +666,7 @@ async function delRef(it) {
 $("refPreviewBtn").onclick = async () => {
   try {
     refHint("正在裁…");
-    const d = await (await hx("/api/ref", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(await refPayload(true)) })).json();
-    if (!d.ok) { refHint(d.error || "预览失败", true); return; }
+    const d = await postJson("/api/ref", await refPayload(true));
     const img = $("refPreview");
     img.src = d.preview; img.style.display = "block";
     const sw = d.src_size[0], sh = d.src_size[1], ow = d.out_size[0], oh = d.out_size[1];
@@ -603,9 +676,7 @@ $("refPreviewBtn").onclick = async () => {
 $("refSaveBtn").onclick = async () => {
   try {
     refHint("正在存…");
-    const d = await (await hx("/api/ref", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(await refPayload(false)) })).json();
-    if (!d.ok) { refHint(d.error || "保存失败", true); return; }
+    const d = await postJson("/api/ref", await refPayload(false));
     const img = $("refPreview");
     img.src = hxUrl("/api/ref/image?project=" + encodeURIComponent(d.project) + "&kind=" + d.kind + "&key=" + encodeURIComponent(d.key));
     img.style.display = "block";
@@ -614,10 +685,13 @@ $("refSaveBtn").onclick = async () => {
   } catch (e) { refHint(e.message, true); }
 };
 $("refFile").onchange = () => {
-  const f = $("refFile").files[0];
-  $("refFileName").textContent = f ? f.name : "";
+  refSel = Array.from($("refFile").files).map(f => ({ file: f, key: baseName(f.name) }));
+  renderBatch();
+  refreshRefFileLabel();
   $("refPreview").style.display = "none";
-  refHint(f ? "已选好图片，点「预览」看裁切效果" : "还没选图片");
+  if (!refSel.length) refHint("还没选图片");
+  else if (refSel.length === 1) refHint("已选好图片，点「预览」看裁切效果");
+  else refHint("选了 " + refSel.length + " 张：起好名点「全部存为参考图」");
 };
 $("projectInput").addEventListener("change", refreshRef);
 $("projectInput").addEventListener("blur", refreshRef);
