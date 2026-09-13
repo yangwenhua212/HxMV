@@ -214,20 +214,9 @@ class ZhipuVideoProvider(VideoProvider):
             return self._local.generate(task)      # 资产图/分镜/成片：复用本地实现
 
         # 复用在最前面：档案里已有这个画面 → 一张都不重新生成（也不消耗额度）
-        from ..core.project import fingerprint
+        from ..core.project import fingerprint, fp_params
         cons, inp = task.constraints, task.input
-        fp = fingerprint({"prompt": inp.get("prompt"), "duration": inp.get("duration"),
-                          "resolution": inp.get("resolution"), "fps": inp.get("fps"),
-                          "seed": inp.get("seed"),
-                          "reference_strength": cons.get("reference_strength"),
-                          "motion_scale": cons.get("motion_scale"),
-                          "audio_gain_db": inp.get("audio_gain_db"),
-                          # with_audio 必须进指纹：不然"开音轨"这条修正会被判成同一画面复用旧文件，
-                          # 修了等于没修（实测：第 2 轮复用静音片，no_audio 反复出现）
-                          "with_audio": bool(inp.get("with_audio")),
-                          "trim_black": bool(inp.get("trim_black")),
-                          "character": cons.get("character"), "scene": cons.get("scene"),
-                          "style": cons.get("style") or (self.project.style if self.project else None)})
+        fp = fingerprint(fp_params(task, self.project, f"zhipu/{self.model}"))
         if self.project:
             hit = self.project.shot(fp)
             if hit:
@@ -306,6 +295,20 @@ class ZhipuVideoProvider(VideoProvider):
             parts.append(f"keep the same character as the reference image ({cons['character']})")
         if cons.get("continuity"):
             parts.append("consistent look with previous shots, cinematic lighting")
+        # 语义守卫：critic 指出**哪一类**不符，就往 prompt 里补那一条具体约束。
+        # 由 refiner 的修正写进来（rewrite_prompt_*），也会被大脑学成"起手就带"。
+        # 注意：这些开关改的就是**发给模型的提示词本身**，必须列进 _FP_KEYS，
+        # 否则指纹不变 → 命中缓存 → 修了等于没修（老坑）。
+        if inp.get("_guard_closer"):
+            parts.append("strictly follow the storyboard above; do not add anything not described")
+        if inp.get("_guard_action"):
+            parts.append("the subject's action must exactly match the action described above")
+        if inp.get("_guard_emotion"):
+            parts.append("match the mood and atmosphere described above "
+                         "(facial expression, lighting, color tone)")
+        if inp.get("_guard_continuity"):
+            parts.append("continue seamlessly from the previous shot: same character, "
+                         "same scene, same costume, same lighting")
         return "，".join(p for p in parts if p)
 
     def set_episode(self, n) -> None:

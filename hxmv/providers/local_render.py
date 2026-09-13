@@ -32,7 +32,7 @@ import time
 
 from ..media import probe
 from .base import ProviderError, VideoProvider
-from ..core.project import Project, fingerprint
+from ..core.project import Project, fingerprint, fp_params
 
 # 低端生成器基线（低于 L1 阈值 → 首轮必然被量出真实缺陷）
 BASE_RESOLUTION = (640, 360)
@@ -208,14 +208,7 @@ class LocalRenderProvider(VideoProvider):
             raise ProviderError("镜头缺少参考资产（character/scene）", retryable=False)
 
         # ---- 画面指纹：档案里已有同参数的画面 → 直接复用文件，**跳过生成** ----
-        fp = fingerprint({
-            "prompt": task.input.get("prompt"), "duration": duration,
-            "resolution": inp.get("resolution"), "fps": fps, "seed": task.input.get("seed"),
-            "reference_strength": strength, "motion_scale": motion, "audio_gain_db": gain_db,
-            "trim_black": bool(inp.get("trim_black")),
-            "character": cons.get("character"), "scene": cons.get("scene"),
-            "style": cons.get("style") or (self.project.style if self.project else None),
-        })
+        fp = fingerprint(fp_params(task, self.project, "local"))
         if self.project:
             hit = self.project.shot(fp)
             if hit:

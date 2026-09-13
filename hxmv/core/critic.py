@@ -45,9 +45,9 @@ DEFECT_FIXES = {
     "semantic_mismatch": ("rewrite_prompt_closer", "与剧本不符：改写 prompt 使其贴合分镜描述"),
     # L3 视觉评审的四类语义失败（真看图之后才会出现；修正方向都落在既有旋钮上）
     "character_mismatch": ("increase_reference_strength", "画面里的人不是该角色：加强角色参考强度/换参考帧"),
-    "action_mismatch":    ("rewrite_prompt_closer", "动作与分镜不符：改写 prompt 写明动作"),
-    "emotion_wrong":      ("rewrite_prompt_closer", "情绪与分镜不符：改写 prompt 补情绪与氛围"),
-    "plot_break":         ("rewrite_prompt_closer", "与前后镜头不连续：改写 prompt 补衔接"),
+    "action_mismatch":    ("rewrite_prompt_action", "动作与分镜不符：改写 prompt 写明动作"),
+    "emotion_wrong":      ("rewrite_prompt_emotion", "情绪与分镜不符：改写 prompt 补情绪与氛围"),
+    "plot_break":         ("rewrite_prompt_continuity", "与前后镜头不连续：改写 prompt 补衔接"),
 }
 
 # 每层扣分权重（物理最致命——黑帧直接废片）

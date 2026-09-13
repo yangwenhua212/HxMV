@@ -22,7 +22,11 @@ _ADJUST = {
     "trim_black_frames":           ("input", "trim_black", None, True),
     "extend_duration":             ("input", "duration", 1.0, 30.0),
     "trim_duration":               ("input", "duration", -1.0, 1.0),
-    "rewrite_prompt_closer":       ("input", "_semantic_guard", None, True),
+    # 语义守卫：critic 点了名就补**那一条**（动作/情绪/衔接），没点名才用笼统的贴剧本
+    "rewrite_prompt_closer":       ("input", "_guard_closer", None, True),
+    "rewrite_prompt_action":       ("input", "_guard_action", None, True),
+    "rewrite_prompt_emotion":      ("input", "_guard_emotion", None, True),
+    "rewrite_prompt_continuity":   ("input", "_guard_continuity", None, True),
 }
 
 _HUMAN_HINT = {
@@ -36,7 +40,10 @@ _HUMAN_HINT = {
     "trim_black_frames": "片头黑帧 → 去掉黑场",
     "extend_duration": "时长不足 → 补时长",
     "trim_duration": "超时长 → 裁时长",
-    "rewrite_prompt_closer": "不符剧本 → 加强语义贴合约束",
+    "rewrite_prompt_closer": "不符剧本（没点名）→ 加强语义贴合约束",
+    "rewrite_prompt_action": "动作与分镜不符 → 提示词锁死动作",
+    "rewrite_prompt_emotion": "情绪与分镜不符 → 提示词锁死情绪/氛围",
+    "rewrite_prompt_continuity": "与前后镜不连续 → 提示词补衔接约束",
 }
 
 # 一次最多应用几条修正。所有现有旋钮彼此正交（分辨率/帧率/音量/黑场/参考强度/运动/时长），
