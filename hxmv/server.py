@@ -40,7 +40,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .core.brain import Brain
 from .core.loop import run
@@ -239,12 +239,31 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             return {}
 
+    @staticmethod
+    def _token_cookie(tok: str) -> str:
+        """给手机浏览器种的长期 Cookie（一年）——只走 HTTPS，同站请求自动带上。"""
+        return f"hxmv_token={quote(tok)}; Path=/; Max-Age=31536000; Secure; SameSite=Lax"
+
+    def _cookie_token(self) -> str:
+        """从 Cookie 里取令牌——手机浏览器 localStorage 会丢（换入口/被清），Cookie 能续上。"""
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "hxmv_token":
+                return unquote(v).strip()
+        return ""
+
     def _authed(self) -> bool:
-        """公网 token 校验（未设置 HXMV_WEB_TOKEN 时全放行，保持本地零配置）。"""
+        """公网 token 校验（未设置 HXMV_WEB_TOKEN 时全放行，保持本地零配置）。
+
+        三种来源任一命中即可：`X-Hxmv-Token` 头 / `?token=` 查询串 / `hxmv_token` Cookie。
+        空值一律当作没带——客户端在没令牌时会发 `X-Hxmv-Token: ""`，别把它当成"带了错的"。
+        """
         if not HXMV_WEB_TOKEN:
             return True
         q = parse_qs(urlparse(self.path).query)
-        tok = self.headers.get("X-Hxmv-Token") or (q.get("token") or [""])[0]
+        tok = ((self.headers.get("X-Hxmv-Token") or "").strip()
+               or ((q.get("token") or [""])[0]).strip()
+               or self._cookie_token())
         return tok == HXMV_WEB_TOKEN
 
     @staticmethod
@@ -292,6 +311,21 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         p = u.path
 
+        if p.startswith("/k/"):
+            # 可收藏的私人入口：/k/<令牌> → 带上令牌的面板地址。
+            # 手机书签用：地址栏里永远带着令牌，不怕 localStorage 被清。
+            tok = unquote(p[3:]).strip()
+            if tok and tok == HXMV_WEB_TOKEN:
+                self.send_response(302)
+                self.send_header("Location", "/?token=" + quote(tok))
+                self.send_header("Set-Cookie", self._token_cookie(tok))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send_err(404, "入口不对")
+            return
+
         if p == "/":
             try:
                 with open(WEB_HTML, encoding="utf-8") as f:
@@ -299,6 +333,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                # 面板改动要立刻生效，别让手机浏览器吃老缓存（真机上踩过：改了看不到）
+                self.send_header("Cache-Control", "no-store")
+                q = parse_qs(urlparse(self.path).query)
+                tok = ((q.get("token") or [""])[0]).strip()
+                if tok and tok == HXMV_WEB_TOKEN:
+                    # 顺手种一年 Cookie：下次不带 ?token= 打开也认
+                    self.send_header("Set-Cookie", self._token_cookie(tok))
                 self.end_headers()
                 self.wfile.write(body)
             except OSError:

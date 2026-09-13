@@ -269,13 +269,14 @@ async function apiGet(path) {
   return d;
 }
 
-// 页面上直接填令牌（原来只能靠 ?token= 进网址，没填就等于用不了）
+// 连接状态：以接口回的 authed/needs_token 为准——Cookie 生效时 localStorage 可能是空的，
+// 不能再拿「TOKEN 是不是空」当「没连上」（真机踩过：状态卡在「未填令牌」）
 async function refreshConn() {
   const el = $("connStatus");
-  if (!TOKEN) { el.textContent = "未填令牌"; return; }
   try {
     const d = await (await hx("/api/health")).json();
-    el.textContent = (d.needs_token && !d.authed) ? "令牌不对" : "已连接 · " + d.server;
+    if (d.authed) { el.textContent = "已连接 · " + d.server; return; }
+    el.textContent = d.needs_token ? (TOKEN ? "令牌不对" : "未填令牌") : "连不上";
   } catch (e) {
     el.textContent = "连不上";
   }
