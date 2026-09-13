@@ -76,6 +76,11 @@ def encoder_args(quality: int = 26) -> list[str]:
     而"手机上直接跑不起来"比"编码次一点"糟糕得多。跑不了 x264 就退到 ffmpeg
     自带的 mpeg4（任何构建都有），代价只是同样的 crf 换成 qscale。
     `HXMV_ENCODER=mpeg4` 可强制指定（老设备/异常构建上排查用）。
+
+    末尾固定带 `-movflags +faststart`：把索引（moov）挪到文件头。
+    实测：不带这个参数，mp4 是「mdat 在前、moov 在尾」，手机浏览器/微信/飞书 webview
+    里播这种文件会**一直转圈**（真机反馈「生成的视频看不了」）。本地下载看没事，
+    但页面里嵌播放器/发给别人看就不行。
     """
     global _ENCODER
     forced = os.environ.get("HXMV_ENCODER", "").strip().lower()
@@ -86,10 +91,12 @@ def encoder_args(quality: int = 26) -> list[str]:
         _ENCODER = ("libx264", "x264") if rc == 0 and "libx264" in out else ("mpeg4", "mpeg4")
     name, _ = _ENCODER
     if name == "libx264":
-        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(quality)]
-    # mpeg4 不吃 -crf：按 crf 粗略折算 qscale（1 最好 / 31 最差）
-    q = max(2, min(12, int(quality / 4)))
-    return ["-c:v", "mpeg4", "-qscale:v", str(q)]
+        base = ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(quality)]
+    else:
+        # mpeg4 不吃 -crf：按 crf 粗略折算 qscale（1 最好 / 31 最差）
+        q = max(2, min(12, int(quality / 4)))
+        base = ["-c:v", "mpeg4", "-qscale:v", str(q)]
+    return base + ["-movflags", "+faststart"]
 
 
 def encoder_name() -> str:

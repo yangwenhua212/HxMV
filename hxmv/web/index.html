@@ -70,6 +70,9 @@
   .batchRow .fname { flex: 0 1 40%; font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .batchRow input { flex: 1; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; color: var(--text); font-size: 13px; min-width: 0; }
   .batchRow button { padding: 3px 9px; font-size: 13px; border-radius: 8px; background: var(--panel2); border: 1px solid var(--border); color: var(--red); }
+  /* 成片/产物：在页面里直接播/看（手机点链接不播） */
+  .art { width: 100%; margin: 6px 0 12px; border-radius: 10px; border: 1px solid var(--border); background: #000; display: block; }
+  .art-img { background: none; }
 
   /* 时间线 */
   .ev { border-left: 2px solid var(--border); padding: 1px 0 16px 18px; margin-left: 7px; position: relative; }
@@ -456,11 +459,26 @@ function showSummary(ev, runId) {
     `<div class="line">✅ <b>${ACTIONS[c.action] || c.action}</b> · 质量 ${c.score}${c.refine_history.length ? ` · 修正 ${c.refine_history.length} 次` : ""}</div>`).join("");
   // 真实产物（local provider）：只给落盘的绝对路径做下载/预览链接
   const files = (ev.outputs || []).filter(p => String(p).startsWith("/"));
+  // 磁盘为准：有的任务把文件真写出来了却被判失败（实测成片就是这样被漏掉的），
+  // 所以把产物目录里真实存在的文件补进来
+  apiGet(`/api/run/${encodeURIComponent(runId)}/files`).then(d => {
+    for (const f of (d.files || [])) {
+      if (!files.some(x => String(x).split("/").pop() === f.name)) files.push(f.name);
+    }
+    paintArts(files, runId, rows);
+  }).catch(() => paintArts(files, runId, rows));
+}
+
+function paintArts(files, runId, rows) {
   const arts = files.map(p => {
     const name = String(p).split("/").pop();
     const url = `/api/artifact?run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(name)}&token=${encodeURIComponent(TOKEN)}`;
     const kind = name.startsWith("final") ? "成片" : name.endsWith(".png") ? "参考图" : "镜头";
-    return `<div class="line">🎬 ${kind} <a href="${url}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(name)}</a></div>`;
+    const head = `<div class="line">🎬 ${kind} <a href="${url}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(name)}</a></div>`;
+    // 页面里直接播/看：手机浏览器点 .mp4 链接多半没反应（真机反馈「视频看不了」）
+    if (name.endsWith(".mp4")) return head + `<video class="art" controls playsinline preload="metadata" src="${url}"></video>`;
+    if (name.endsWith(".png")) return head + `<img class="art art-img" src="${url}" alt="">`;
+    return head;
   }).join("");
   $("sumBody").innerHTML = (rows || '<div class="empty">本次没有完成任务</div>') + arts;
 }

@@ -28,7 +28,8 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 | `/api/run/<id>` | GET | 全量事件 + `status: running\|done`（**状态看事件里有没有 run.done，不靠最后一条**） |
 | `/api/runs` | GET | 制片历史摘要列表 |
 | `/api/brain` | GET | 大脑条目（做过什么、学到什么） |
-| `/api/artifact?run_id=&name=` | GET | 取产物字节（mp4/png，`Content-Disposition: inline`） |
+| `/api/artifact?run_id=&name=` | GET | 取产物字节（mp4/png，`Content-Disposition: inline`；**支持 `Range` → 206**，浏览器里的 `<video>` 靠它起播/拖进度） |
+| `/api/run/<id>/files` | GET | 该 run 产物目录里**真实存在**的文件（磁盘为准，含被判失败但已写出的成片；面板的成片播放器用它） |
 | `/api/config` | GET | **接口配置状态**（面板设置页用）：各 provider 是否配好 Key（只回**脱敏**串，明文永不回传）、`options.video_model`／`options.vlm_model` 当前档位、`vision{ready,model}` |
 | `/api/config` | POST `{provider,key?,video_model?,vlm_model?}` | **保存接口配置**（写入实例本机 `~/.hxmv/config.json`，600）。Key 不回传；档位保存后**立即生效**，不用重启 |
 | `/api/ref?project=` | GET | 项目参考图清单：`{characters:[{key,name,exists,size,url}],scenes:[…]}`——客户端可直接把 `url` 塞进 `<img>`（记得带 token） |
