@@ -166,6 +166,13 @@ class ProviderExecutor(Executor):
         api_task = replace(task)
         api_task.input = dict(task.input)          # 浅拷贝，不污染原 Task（审计干净）
         api_task.constraints = dict(task.constraints)
+        # 能力钳制：要求超过 provider 上限的时长只会换来**必然的 too_short + 修无可修**
+        # （实测：要 8s、模型只给 5.1s，连修 4 轮产物一模一样）。要不到就别要。
+        cap = getattr(self.provider, "max_duration", None)
+        if task.action == ACTION_GENERATE_SHOT and cap:
+            want = float(api_task.input.get("duration") or 0)
+            if want > cap:
+                api_task.input["duration"] = cap
         for (src_where, src_key), (dst_where, dst_key, fn) in _PROJECTION.items():
             src = task.constraints if src_where == "constraints" else task.input
             if src_key in src:

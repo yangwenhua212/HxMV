@@ -35,6 +35,9 @@ DEFAULT_BASE = "https://open.bigmodel.cn/api/paas/v4"
 SIZE_MAP = {"480p": "1920x1080", "720p": "1920x1080", "1080p": "1920x1080",
             "4k": "3840x2160", "2160p": "3840x2160"}
 COST_UNITS = {"cogvideox-flash": 0.0, "cogvideox-3": 1.05, "cogvideox-2": 0.7}  # 元/次（flash 免费）
+# 各档位真实能给的时长（秒）：flash 只出 5 秒档；`_submit` 里 >7 才会要 10 秒档。
+# 声明出来是为了让执行器"要不到就别要"，否则闭环会一直撞 too_short（实测撞了 4 轮）。
+MAX_DURATION = {"cogvideox-flash": 5.0, "cogvideox-3": 10.0, "cogvideox-2": 10.0}
 
 
 def _data_url(path: str) -> str:
@@ -88,6 +91,7 @@ class ZhipuVideoProvider(VideoProvider):
         self.base = os.environ.get("HXMV_ZHIPU_BASE", DEFAULT_BASE).rstrip("/")
         # 档位来源：HXMV_ZHIPU_MODEL 环境变量 → ~/.hxmv/config.json（面板设置页可切）
         self.model = config.option("zhipu", "video_model") or "cogvideox-flash"
+        self.max_duration = MAX_DURATION.get(self.model, 5.0)   # 执行器据此钳制"要多久"
         self.timeout = float(os.environ.get("HXMV_ZHIPU_TIMEOUT", "420"))
         self.outdir = outdir or os.environ.get("HXMV_ARTIFACTS") or (
             os.path.join(project.dir, "artifacts") if project else
@@ -184,6 +188,8 @@ class ZhipuVideoProvider(VideoProvider):
         省额度、更快，Critic 复测时量到的是真变化。
         """
         gain = task.input.get("audio_gain_db")
+        if gain and not (probe.probe_container(path) or {}).get("has_audio"):
+            gain = None      # 没有音轨可增益：这刀下不去，交给 enable_audio（真让模型带音频）
         if gain:
             tmp = path.replace(".mp4", "_gain.mp4")
             rc, _ = probe._run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", path,
@@ -216,6 +222,9 @@ class ZhipuVideoProvider(VideoProvider):
                           "reference_strength": cons.get("reference_strength"),
                           "motion_scale": cons.get("motion_scale"),
                           "audio_gain_db": inp.get("audio_gain_db"),
+                          # with_audio 必须进指纹：不然"开音轨"这条修正会被判成同一画面复用旧文件，
+                          # 修了等于没修（实测：第 2 轮复用静音片，no_audio 反复出现）
+                          "with_audio": bool(inp.get("with_audio")),
                           "trim_black": bool(inp.get("trim_black")),
                           "character": cons.get("character"), "scene": cons.get("scene"),
                           "style": cons.get("style") or (self.project.style if self.project else None)})
@@ -229,13 +238,16 @@ class ZhipuVideoProvider(VideoProvider):
         # 参考图：项目档案里的角色参考图（图生视频的首帧）→ 角色一致性硬约束
         image = None
         ref_path = None
+        ref_kind = None
         if self.project:
             for field, kind in (("character", "character"), ("scene", "scene")):
                 key = cons.get(field)
                 if key:
                     hit = self.project.asset(kind, str(key))
                     if hit:
-                        ref_path, image = hit["path"], _data_url(hit["path"])
+                        # 记下参考图是哪一类：只有角色图时不该去比场景（否则真 AI 视频
+                        # 换个场景就被判"场景不一致"，而它根本拿不到场景参考——修无可修）
+                        ref_path, image, ref_kind = hit["path"], _data_url(hit["path"]), kind
                         break
 
         prompt = self._build_prompt(task)
@@ -257,7 +269,7 @@ class ZhipuVideoProvider(VideoProvider):
         self._local._slot_bind(task, path, fp)     # 让成片层知道这个镜头在哪
         cont = probe.probe_container(path) or {}
         out = {
-            "media": path, "reference": ref_path,
+            "media": path, "reference": ref_path, "reference_kind": ref_kind,
             # 图生视频：首帧应当贴近参考图 → 一致性采样点取 0%，
             # 并用"同编码管线的参考帧"当基线（否则编码差异会被误判成不一致）
             "reference_baseline": _encoded_frame(ref_path, cont.get("width"), cont.get("height"),

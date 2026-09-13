@@ -38,7 +38,7 @@ THRESHOLDS = {
 }
 
 # 缺陷键必须与 core/critic.py 的 DEFECT_FIXES 对齐（那里定义修正方向）
-DEFECT_KEYS = ("black_frame", "low_clarity", "fps_too_low", "low_volume",
+DEFECT_KEYS = ("black_frame", "low_clarity", "fps_too_low", "low_volume", "no_audio",
                "frozen_frame", "too_short", "too_long")
 
 _FFMPEG = None
@@ -341,7 +341,11 @@ def detect_defects(m: dict, expect_duration: float | None = None) -> list[str]:
     if m.get("fps") and m["fps"] < t["min_fps"]:
         defects.append("fps_too_low")
     vol = m.get("mean_volume_db")
-    if not m.get("has_audio") or (vol is not None and vol < t["min_mean_volume_db"]):
+    if not m.get("has_audio"):
+        # 没有音轨 ≠ 音量低：真 AI 视频默认就是无声的，判成"音量过低"会每条都废片，
+        # 而"增益"对一个不存在的音轨是空操作（实测：修了 4 次模型全一样）。这是两种不同的病。
+        defects.append("no_audio")
+    elif vol is not None and vol < t["min_mean_volume_db"]:
         defects.append("low_volume")
     if (m.get("black_seconds") or 0) > t["black_seconds"]:
         defects.append("black_frame")

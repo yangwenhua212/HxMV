@@ -27,6 +27,7 @@ class VideoProvider(abc.ABC):
 
     name: str = "provider"           # 服务名，用于日志/记忆
     action_map: dict = {}            # 本 provider 支持的 Task.action → API 动作
+    max_duration: float | None = None  # 单镜头时长上限（秒）：模型做不到的别要，见 execute() 的钳制
 
     @abc.abstractmethod
     def generate(self, task) -> dict:

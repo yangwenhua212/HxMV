@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import json
+
 from .state import ExecutionState, Task, TaskStatus
 from .refiner import Refiner
 
@@ -41,8 +43,26 @@ class Controller:
 
         max_attempts = int(task.retry_policy.get("max_attempts", 3))
         attempts = task.retry_policy.get("attempts", 0)
+
+        # 修正没生效的识别：**同样的失败 + 同样的实测值** = 上一轮那几刀在产物上没落地。
+        # 真 API 上实测过：extend_duration 改了三次，出来的还是同一个 5.1 秒片——
+        # 那不是"还在收敛"，是同一个动作重复烧额度，必须收手。
+        measured = result.get("measured")
+        sig = (tuple(sorted(report.failures)),
+               json.dumps(measured, sort_keys=True, ensure_ascii=False) if measured else "")
+        if report.failures and task.retry_policy.get("last_sig") == sig:
+            self._fail(state, task)
+            state.observations.append(
+                {"task_id": task.task_id, "report": report,
+                 "note": f"{task.action} 终态 FAIL（修正无效：实测结果与上次完全相同）score={report.score:.2f}"})
+            state.log(f"❌ {task.action} {task.task_id} 终态 FAIL"
+                      f"（修正没落到产物上，实测结果一模一样，提前收手）")
+            return "FAIL"
+
         retry_task = None if attempts >= max_attempts else \
             self.refiner.refine(task, report, state.memory.get("quality", {}))
+        if retry_task is not None:
+            retry_task.retry_policy["last_sig"] = sig   # 留给下一轮比对
 
         if retry_task is not None:
             state.observations.append(
@@ -53,9 +73,8 @@ class Controller:
                       f"(尝试 {attempts+1}/{max_attempts}) → 重试: {retry_task.refine_history[-1]}")
             return "RETRY"
 
-        task.status = TaskStatus.FAIL
-        state.failed.append(task)
-        # 区分两种终态：预算真的耗尽 vs 已经没有可调参数（后者要继续跑也只是重复同一件事）
+        self._fail(state, task)
+        # 区分三种终态：预算真的耗尽 / 没有可调参数 / 修了但产物一模一样（修正没生效）
         exhausted = attempts >= max_attempts
         why = f"{attempts+1} 次尝试耗尽" if exhausted else "已无参数可调，提前收手"
         state.observations.append(
@@ -63,6 +82,21 @@ class Controller:
              "note": f"{task.action} 终态 FAIL（{why}）score={report.score:.2f}"})
         state.log(f"❌ {task.action} {task.task_id} 终态 FAIL（{why}）")
         return "FAIL"
+
+    @staticmethod
+    def _fail(state: ExecutionState, task: Task) -> None:
+        """终结一条任务**血统**。
+
+        重试任务是父任务的 child（同一个 task_id），失败的是 child，而 `state.tasks` 里
+        留着那个仍是 PENDING 的父任务——不一起结掉，Planner 下一轮会把父任务原地再发一遍，
+        同一件事无限重来（实测：提前收手后又被重发 13 轮，最后伪装成"预算耗尽"收场）。
+        """
+        for t in state.tasks:
+            if t.task_id == task.task_id:
+                t.status = TaskStatus.FAIL
+        task.status = TaskStatus.FAIL
+        if task not in state.failed:
+            state.failed.append(task)
 
     def _remember_success(self, state: ExecutionState, task: Task, report) -> None:
         """PASS 时：把 fixes_applied 里被验证有效的 (failure→suggestion) 记入质量记忆。

@@ -36,6 +36,7 @@ DEFECT_FIXES = {
     "motion_blur":      ("reduce_motion_scale", "运动模糊：降低运动幅度/提高快门"),
     "fps_too_low":      ("increase_fps", "帧率过低：重采样到 30fps"),
     "low_volume":       ("boost_audio_gain", "音量过低：增益 +10dB"),
+    "no_audio":         ("enable_audio", "没有音轨：让生成模型带音频"),
     "frozen_frame":     ("increase_motion_scale", "画面静止：提高运动幅度"),
     "too_short":        ("extend_duration", "时长不足：补时长"),
     "too_long":         ("trim_duration", "超时长：裁时长"),
@@ -105,7 +106,7 @@ class L1PhysicsCritic(Critic):
 
     layer = "L1_PHYSICS"
     _INJECTED = ("black_frame", "low_clarity", "motion_blur", "fps_too_low",
-                 "low_volume", "too_long", "too_short", "frozen_frame")
+                 "low_volume", "no_audio", "too_long", "too_short", "frozen_frame")
 
     def evaluate(self, task: Task, result: dict) -> QualityReport:
         if task.action not in (ACTION_GENERATE_SHOT, ACTION_COMPOSE):
@@ -183,10 +184,20 @@ class L2VisualCritic(Critic):
         try:
             if not frames:
                 return None
-            text = (f"第一张图 = 基准参考；后面 {len(frames)} 张 = 本镜头实际画面（按时间顺序）。"
-                    f"判断主体角色与场景是否与参考一致。")
+            # 只问"给了参考的那一类"：只有角色参考图时去问场景，会得到"场景不一致"——
+            # 而它根本没有场景参考，修无可修（真 AI 视频实测：换成下雪背景就被判死）。
+            kind = str(result.get("reference_kind") or "").lower()
+            ask_char = kind != "scene"
+            ask_scene = (kind == "scene") or not kind
+            text = f"第一张图 = 基准参考；后面 {len(frames)} 张 = 本镜头实际画面（按时间顺序）。"
+            if ask_char and not ask_scene:
+                text += "参考是**角色**基准：只判断主体是不是同一个角色（场景是否相同不用管）。"
+            elif ask_scene and not ask_char:
+                text += "参考是**场景**基准：只判断是不是同一个场景（主体是谁不用管）。"
+            else:
+                text += "判断主体角色与场景是否与参考一致。"
             who = task.constraints.get("character") or task.constraints.get("characters")
-            if who:
+            if who and ask_char:
                 text += f"参考角色：{who}。"
             data = _parse_json(llm.chat_vision(self.SYSTEM, text, [ref] + frames))
             if data is None:
@@ -200,12 +211,13 @@ class L2VisualCritic(Critic):
                 "pixel_consistency": result.get("consistency"),
             }
             defects: list[str] = []
-            if not same_char:
+            if ask_char and not same_char:
                 defects.append("character_inconsistency")
-            if not same_scene:
+            if ask_scene and not same_scene:
                 defects.append("scene_inconsistency")
-            detail = (f"视觉身份判定（参考 + {len(frames)} 帧）："
-                      f"角色{'一致' if same_char else '不一致'} / 场景{'一致' if same_scene else '不一致'}")
+            char_txt = ("一致" if same_char else "不一致") if ask_char else "未提供参考·不判定"
+            scene_txt = ("一致" if same_scene else "不一致") if ask_scene else "未提供参考·不判定"
+            detail = f"视觉身份判定（参考 + {len(frames)} 帧）：角色{char_txt} / 场景{scene_txt}"
             if result.get("consistency") is not None:
                 detail += f" · 像素一致度 {result['consistency']:.3f}（遥测）"
             return self._report(defects, detail=detail)
@@ -231,7 +243,8 @@ class L3SemanticCritic(Critic):
     SYSTEM = (
         "你是 HxMV 的 L3 语义评审，会拿到**真实抽帧**和分镜描述。\n"
         "逐条判断画面是否符合分镜：角色对不对、动作对不对、情绪对不对、与前后镜头连不连续。\n"
-        '只输出 JSON：{"failures": [], "score": 0.9, "reason": "一句话"}，score 0-1。\n'
+        "必须给出明确结论 ok（true=符合分镜，false=不符），score 只作参考。\n"
+        '只输出 JSON：{"ok": true, "failures": [], "score": 0.9, "reason": "一句话"}，score 0-1。\n'
         "failures 只填**确实对不上**的项，取值限定：character_mismatch / action_mismatch / "
         "emotion_wrong / plot_break；都对得上就留空数组。"
     )
@@ -276,23 +289,30 @@ class L3SemanticCritic(Critic):
             raw_fail = data.get("failures", [])
             fail = [f for f in raw_fail if isinstance(f, str) and f in DEFECT_FIXES][:4]
             score = data.get("score")
-            # 低分却没点名缺陷 → **不许当成通过**（实测 GLM-4V-Flash 会回
-            # score=0.0 + failures=[]，描述写"没有柯基犬"）。这是最阴的假通过，
-            # 必须落一个能驱动修正的失败键，把判定交给闭环。
+            ok = data.get("ok")
+            # 判定口径：以模型**明确表态**的 ok 为准，score 只当参考——把模糊自评分当硬门槛，
+            # 严模型会把真片也判死（实测 GLM-4V-Flash 对"柯基在雪地奔跑"给 0.1 分）。
+            # 但说了 ok=false 却一个缺陷都不点名 = 不许当通过（那是最阴的假通过），
+            # 落一个能驱动修正的键；老格式（只给 score）沿用低分兜底。
             try:
                 low = float(score) < float(task.quality.get("min_score", 0.8))
             except (TypeError, ValueError):
                 low = False
-            if low and not fail:
+            if fail:
+                pass
+            elif ok is False:
+                fail = ["semantic_mismatch"]
+            elif ok is None and low:
                 fail = ["semantic_mismatch"]
             result["vision_review"] = {
                 "model": llm.vision_model(), "frames": len(frames),
                 "failures": fail, "score": score,
                 "reason": str(data.get("reason", ""))[:200],
             }
-            detail = f"视觉评审（{len(frames)} 帧真画面）· 分镜符合度 {score}"
-            if low and fail == ["semantic_mismatch"]:
-                detail += "（低分且未点名缺陷 → 记语义不符）"
+            detail = f"视觉评审（{len(frames)} 帧真画面）· 结论 {'符合' if ok else '不符' if ok is False else '未表态'}"
+            detail += f" · 自评 {score}"
+            if fail == ["semantic_mismatch"]:
+                detail += "（未点名缺陷 → 记语义不符）"
             return self._report(fail, detail=detail)
         except Exception as exc:  # 视觉模型挂了不能拖垮闭环：退回文字路径
             result["vision_review"] = {"error": str(exc)[:160]}
