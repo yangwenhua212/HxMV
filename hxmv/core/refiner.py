@@ -37,6 +37,32 @@ _HUMAN_HINT = {
     "rewrite_prompt_closer": "不符剧本 → 加强语义贴合约束",
 }
 
+# 一次最多应用几条修正。所有现有旋钮彼此正交（分辨率/帧率/音量/黑场/参考强度/运动/时长），
+# 上限只是「防未来出现互相打架的旋钮」的护栏——**别拿它省钱**：一次修到位比来回烧预算好。
+MAX_FIXES = 8
+
+# 修正优先级：**先修「内容对不对」，再修「物理好不好」**。角色错了/不符合分镜的镜头，
+# 再清晰也没用；而物理微调（升分辨率、加增益）成本低、可以下一轮再修。
+# 数字越小越先修；表里没有的排最后。同优先级保持 Critic 给的原顺序（稳定排序）。
+_FIX_PRIORITY = {
+    "character_mismatch": 0,
+    "character_inconsistency": 1,
+    "scene_inconsistency": 1,
+    "action_mismatch": 2,
+    "emotion_wrong": 2,
+    "plot_break": 2,
+    "semantic_mismatch": 3,
+    "low_clarity": 4,
+    "fps_too_low": 5,
+    "motion_blur": 5,
+    "frozen_frame": 5,
+    "low_volume": 6,
+    "black_frame": 7,
+    "too_short": 8,
+    "too_long": 8,
+}
+_FIX_PRIORITY_DEFAULT = 99
+
 
 def _apply(task: Task, action: str) -> str:
     """执行参数调整，返回人话说明。"""
@@ -70,14 +96,15 @@ class Refiner:
         pairs = _pair_failures_suggestions(report)
         if not pairs:
             return None
+        # 先修内容（角色/分镜），再修物理（清晰度/音量/黑帧）；同优先级保持原顺序
+        pairs.sort(key=lambda fs: _FIX_PRIORITY.get(fs[0], _FIX_PRIORITY_DEFAULT))
 
         # 历史成功修正优先于默认建议：找出记忆里被验证过的 (failure, suggestion)
         chosen: list[tuple[str, str]] = []
         for f, s in pairs:
             hint = self._memory_hint(f, memory or {})
             chosen.append((f, hint if hint else s))
-        chosen = chosen[:4]  # 一次最多应用四条修正：分辨率/帧率/音量/黑场/参考强度彼此正交，
-        # 上限只是护栏（防未来出现互相打架的旋钮），不是省钱手段——一次修到位比来回烧预算好。
+        chosen = chosen[:MAX_FIXES]
 
         new_task = task.child()
         notes, applied = [], []
