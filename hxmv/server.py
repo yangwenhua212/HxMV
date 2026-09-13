@@ -112,14 +112,25 @@ class RunManager:
     def __init__(self):
         self.queue: queue.Queue = queue.Queue()
         self.recorders: dict[str, RunRecorder] = {}
+        self._active: set[str] = set()
         self.lock = threading.Lock()
+        # 正在跑/排队中的 run_id——用来分辨「进行中」和「被中断」
+        # （服务重启/进程被杀时，磁盘上那些没有 run.done 的 run 会一直显示"进行中"，
+        #  真机反馈过：面板说进行中，其实早就断了，白等。ACTIVE_RUNS 由 submit 登记）
+        global ACTIVE_RUNS
+        ACTIVE_RUNS = self._active
         threading.Thread(target=self._worker_loop, daemon=True).start()
+
+    @property
+    def active(self) -> set[str]:
+        return self._active
 
     def submit(self, goal: str, provider: str = "", project: str = "") -> str:
         run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
         rec = RunRecorder(run_id)
         with self.lock:
             self.recorders[run_id] = rec
+            self._active.add(run_id)
         self.queue.put({"run_id": run_id, "goal": goal, "provider": provider,
                         "project": project})
         return run_id
@@ -151,6 +162,8 @@ class RunManager:
                           "cost_units": 0, "iterations": 0, "budget_exhausted": False,
                           "brain": {}, "outputs": []})
             finally:
+                with self.lock:
+                    self._active.discard(run_id)
                 rec.done = True
                 self._notify_done(run_id, job, rec)
 
@@ -169,6 +182,10 @@ class RunManager:
         payload["provider"] = job.get("provider") or "mock"
         rec.emit({"type": "notify", "result": _notify.notify(payload)})
 
+
+# 正在跑/排队中的 run_id（RunManager 启动时把它指向自己的活跃集合，供 _scan_runs 判断
+# 「进行中」还是「被中断」——没有它，服务重启后残留的 run 会永久显示"进行中"）
+ACTIVE_RUNS: set[str] = set()
 
 MANAGER = RunManager()
 
@@ -207,7 +224,13 @@ def _scan_runs() -> list[dict]:
             continue
         if head is None:
             continue
-        status = "running" if not (tail and tail.get("type") == "run.done") else "done"
+        # 三种状态：跑完 / 正在跑 / 被中断（没 run.done 又不在活跃集合里 = 服务重启等打断的残留）
+        if tail and tail.get("type") == "run.done":
+            status = "done"
+        elif name in ACTIVE_RUNS:
+            status = "running"
+        else:
+            status = "aborted"
         out.append({
             "run_id": name,
             "goal": head.get("goal", ""),

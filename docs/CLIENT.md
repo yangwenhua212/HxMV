@@ -26,7 +26,7 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 | `/api/run` | POST `{goal, provider, project}` | 提交生产任务 → `{run_id}` |
 | `/api/stream?run_id=&token=` | GET (SSE) | 实时事件流（先回放已落盘事件，再推送新事件） |
 | `/api/run/<id>` | GET | 全量事件 + `status: running\|done`（**状态看事件里有没有 run.done，不靠最后一条**） |
-| `/api/runs` | GET | 制片历史摘要列表 |
+| `/api/runs` | GET | 制片历史摘要列表（`status` = `done`／`running`／**`aborted`**：没写完又不在活跃集合里 = 被服务重启等打断，**客户端必须区分**，别再显示"进行中"） |
 | `/api/brain` | GET | 大脑条目（做过什么、学到什么） |
 | `/api/artifact?run_id=&name=` | GET | 取产物字节（mp4/png，`Content-Disposition: inline`；**支持 `Range` → 206**，浏览器里的 `<video>` 靠它起播/拖进度） |
 | `/api/run/<id>/files` | GET | 该 run 产物目录里**真实存在**的文件（磁盘为准，含被判失败但已写出的成片；面板的成片播放器用它） |
