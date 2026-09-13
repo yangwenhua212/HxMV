@@ -43,12 +43,21 @@ def run_one(goal: str, project_id: str, brain, provider: str) -> dict:
     from hxmv.core.project import Project
 
     done: dict = {}
+    first_fail: dict = {}
     t0 = time.time()
     buf = io.StringIO()
+
+    def _collect(ev: dict) -> None:
+        """收 run.done 汇总；另外记下**每个任务第一次**的失败键（重试子任务沿用同一 task_id，
+        所以"第一次出现的"就是首轮失败）——用来算"首轮失败里有多少是参数改不掉的"。"""
+        if ev.get("type") == "run.done":
+            done.update(ev)
+        elif ev.get("type") == "critic" and ev.get("failures"):
+            first_fail.setdefault(ev.get("task_id") or ev.get("action"), list(ev["failures"]))
+
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         state = run(goal, brain=brain, project=Project.load(project_id),
-                    emit=lambda e: done.update(e) if e.get("type") == "run.done" else None,
-                    verbose=False)
+                    emit=_collect, verbose=False)
     seconds = round(time.time() - t0, 2)
     completed = done.get("completed", [])
     # 首轮通过 = **整体通过**且每一项都没用过修正（refine_history 空）。
@@ -65,10 +74,20 @@ def run_one(goal: str, project_id: str, brain, provider: str) -> dict:
         "pass": bool(completed) and not done.get("failed"),
         "fixes": sorted({f.split(":")[0].strip() for c in completed
                          for f in (c.get("refine_history") or [])}),
+        "first_failures": sorted({f for fs in first_fail.values() for f in fs}),
         "seconds": seconds,
         "output": buf.getvalue().strip().split("\n")[-1] if buf.getvalue() else "",
         "state_ok": state is not None,
     }
+
+
+def failure_mix(rows: list[dict]) -> list:
+    """首轮失败键的分布（照实列出来）——看剩下的返工到底是哪几类。"""
+    tally: dict = {}
+    for r in rows:
+        for f in r.get("first_failures", []):
+            tally[f] = tally.get(f, 0) + 1
+    return sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -168,6 +187,22 @@ def render_md(results: dict, path: str) -> None:
         lines.append("- 但**首轮通过率没涨**：经验只覆盖了一部分缺陷类型，其余仍从默认起手。"
                      "看「修正过」那列反复出现的键，那就是还没进起手参数的短板。")
     lines.append("- 曲线**不保证单调**：生成器本身带随机性，单轮波动不代表退步，看多轮走向。")
+    mix_all: dict = {}
+    for r in rounds:
+        for k, v in r.get("failure_mix", []):
+            mix_all[k] = mix_all.get(k, 0) + v
+    if mix_all:
+        top = sorted(mix_all.items(), key=lambda kv: -kv[1])[:3]
+        lines.append("- 首轮失败最多的三类：" + "、".join(f"{k} ×{v}" for k, v in top) + "。")
+        if results["provider"] == "mock":
+            lines.append("- 天花板说明：mock 世界里 `semantic_mismatch` 是**固定概率**"
+                         "（每镜头 8%，与任何参数无关）→ 首轮通过率不可能到 100%；"
+                         "`character_inconsistency`/`scene_inconsistency` 与参考强度挂钩，"
+                         "所以靠「经验起手」能压下去——两类要分开看，别拿同一个目标衡量。")
+    lines += ["", "## 每轮首轮失败的原因分布（哪些参数能改、哪些改不掉）", ""]
+    for r in rounds:
+        mix = "、".join(f"{k} ×{v}" for k, v in r.get("failure_mix", [])) or "（无首轮失败）"
+        lines.append(f"- 第 {r['round']} 轮：{mix}")
     lines += ["", "## 每轮目标明细", ""]
     for r in rounds:
         lines.append(f"**第 {r['round']} 轮**")
@@ -240,6 +275,7 @@ def main() -> int:
         s = summarize(items)
         s["round"] = rnd
         s["items"] = items
+        s["failure_mix"] = failure_mix(items)
         s["brain"] = brain.stats()
         rounds.append(s)
         print(f"→ 第{rnd}轮合计：通过 {s['pass_rate'] * 100:.0f}% ｜ "

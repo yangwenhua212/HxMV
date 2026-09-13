@@ -22,6 +22,54 @@ from .state import (
 class Planner:
     """接口：next_task(state) -> Task | None（None = 规划完毕）。"""
 
+    def _learnt_strength(self, failure_key: str, base: float) -> float:
+        """从大脑读取同类失败经验：**被验证的次数**越多，起手参数越稳。
+
+        用 meta.times（该修正被验证成功的次数）而不是"记忆条数"——同源经验会累积成一条，
+        按条数算会永远停在第一档（实测踩过：连跑几次起手强度一直 0.45）。
+        """
+        if not self._brain:
+            return base
+        hits = 0
+        for e in self._brain.entries:
+            if e.kind == "LESSON" and e.meta.get("failure") == failure_key:
+                hits += int(e.meta.get("times", 1))
+        # 每次被验证成功 +0.1 起步。原来是 +0.05：跑分 5 轮 × 2 镜头都爬不到稳态，
+        # 首轮通过率那条线就永远平着（第三刀的跑分就是证据）。
+        return min(1.0, round(base + 0.1 * hits, 3))  # 必须 round：浮点会写出 0.6000000000000001
+
+    def _learnt_params(self) -> tuple[dict, dict, list[str]]:
+        """从大脑里学到"这个生成器的脾气"，直接按**验证过的参数**起手。
+
+        这是 mock 版的"规划时带着记忆"（真 LLM 规划走 Brain.inject 注入同样的经验文本）：
+        上次量出低清晰度/低帧率/音轨轻/黑场并修好了，这次就别再踩——第一步就该是对的。
+
+        **第四刀**：以前只覆盖物理旋钮，而跑分里最常返工的 `increase_reference_strength`
+        与 `rewrite_prompt_closer` 每次仍从默认起手 → 首轮通过率卡在 12% 不动。
+        现在身份/语义这两类也一起起手（返回 input 种子与 constraints 种子）。
+        """
+        if not self._brain:
+            return {}, {}, []
+        learned = {e.meta.get("suggestion") for e in self._brain.entries if e.kind == "LESSON"}
+        inp: dict = {}
+        cons: dict = {}
+        notes: list[str] = []
+        for key, sug, value, label in (
+                ("resolution", "increase_resolution", "720p", "分辨率 720p"),
+                ("fps", "increase_fps", 30, "帧率 30"),
+                ("audio_gain_db", "boost_audio_gain", 10.0, "音量 +10dB"),
+                ("trim_black", "trim_black_frames", True, "去黑场")):
+            if sug in learned:
+                inp[key] = value
+                notes.append(label)
+        if "reduce_motion_scale" in learned:      # 运动模糊 → 动作幅度（在 constraints 里）
+            cons["motion_scale"] = 0.25
+            notes.append("运动幅度 0.25")
+        if "rewrite_prompt_closer" in learned:    # 语义不符 → 提示词起手就贴剧本
+            inp["_semantic_guard"] = True
+            notes.append("提示词贴剧本")
+        return inp, cons, notes
+
     def next_task(self, state: ExecutionState) -> Task | None:
         raise NotImplementedError
 
@@ -45,41 +93,6 @@ class MockPlanner(Planner):
         self._brain = brain
         self.project = project
 
-    def _learnt_strength(self, failure_key: str, base: float) -> float:
-        """从大脑读取同类失败经验：**被验证的次数**越多，起手参数越稳。
-
-        用 meta.times（该修正被验证成功的次数）而不是"记忆条数"——同源经验会累积成一条，
-        按条数算会永远停在第一档（实测踩过：连跑几次起手强度一直 0.45）。
-        """
-        if not self._brain:
-            return base
-        hits = 0
-        for e in self._brain.entries:
-            if e.kind == "LESSON" and e.meta.get("failure") == failure_key:
-                hits += int(e.meta.get("times", 1))
-        return min(1.0, round(base + 0.05 * hits, 3))  # 每次验证 +0.05（必须 round：浮点会写出 0.6000000000000001）
-
-    def _learnt_params(self) -> tuple[dict, list[str]]:
-        """从大脑里学到"这个生成器的脾气"，直接按**验证过的参数**起手。
-
-        这是 mock 版的"规划时带着记忆"（真 LLM 规划走 Brain.inject 注入同样的经验文本）：
-        上次量出低清晰度/低帧率/音轨轻/黑场并修好了，这次就别再踩——第一步就该是对的。
-        """
-        if not self._brain:
-            return {}, []
-        learned = {e.meta.get("suggestion") for e in self._brain.entries if e.kind == "LESSON"}
-        values = {"resolution": "720p", "fps": 30, "audio_gain_db": 10.0, "trim_black": True}
-        pairs = (("resolution", "increase_resolution", "720p"),
-                 ("fps", "increase_fps", "30fps"),
-                 ("audio_gain_db", "boost_audio_gain", "+10dB"),
-                 ("trim_black", "trim_black_frames", "去黑场"))
-        inp, notes = {}, []
-        for key, sug, label in pairs:
-            if sug in learned:
-                inp[key] = values[key]
-                notes.append(label)
-        return inp, notes
-
     def _apply_archive(self, inp: dict, cons: dict) -> str | None:
         """把项目档案里\"这个镜头上次用的参数\"盖到当前任务上（返回命中的镜头名，无命中返回 None）。"""
         if not self.project:
@@ -102,7 +115,7 @@ class MockPlanner(Planner):
             base = _first_scene_prompt(state.goal)
             s_char = self._learnt_strength("character_inconsistency", 0.4)
             s_scene = self._learnt_strength("scene_inconsistency", 0.4)
-            seeded, notes = self._learnt_params()
+            seeded, seeded_cons, notes = self._learnt_params()
             # 项目档案优先：角色/场景/风格必须沿用档案里的，否则每次跑都在"新建角色"
             char_key = next(iter(self.project.characters), "cat") if self.project else "cat"
             scene_key = next(iter(self.project.scenes), "s01") if self.project else "s01"
@@ -118,6 +131,8 @@ class MockPlanner(Planner):
             shot1.update(seeded)
             shot2.update(seeded)
             cons1, cons2 = dict(shot_constraints), dict(shot_constraints)
+            cons1.update(seeded_cons)          # 学到手的动作幅度等约束也要起手就带上
+            cons2.update(seeded_cons)
             # 项目档案（具体）优先于大脑泛化经验：这一集这个镜头做过 → 沿用上次那版参数，
             # 指纹随即命中 → 直接复用旧画面，一张都不重画。
             hits = [h for h in (self._apply_archive(shot1, cons1),
@@ -212,12 +227,32 @@ class LLMPlanner(Planner):
             scene_key = scene_key or archived_scene
 
         tasks: list[Task] = []
+        # 起手参数（第四刀）：真 LLM 规划也吃同样的经验——模型只在提示词里"看到"经验，
+        # 不一定真照做；身份强度/动作幅度/贴剧本这三样由代码确定性地带上，行为才稳定。
+        seeded_inp, seeded_cons, learnt_notes = self._learnt_params()
+        seeded_strength = self._learnt_strength("character_inconsistency", 0.4)
+        seeded_scene = self._learnt_strength("scene_inconsistency", 0.4)
+        self._notes = []
+        if learnt_notes or seeded_strength > 0.4:
+            self._notes.append("🧠 记忆起手（真规划也带上）："
+                               + f"reference_strength {seeded_strength:.2f}"
+                               + (f" / {'、'.join(learnt_notes)}" if learnt_notes else "")
+                               + "（上次验证过的）")
         for t in items:
             raw_cons = t.get("constraints") if isinstance(t.get("constraints"), dict) else {}
             cons = {self._CONS_ALIASES.get(k, k): v for k, v in raw_cons.items()}
+            if not isinstance(t.get("input"), dict):
+                t["input"] = {}                  # input 缺失也要能塞进起手参数（原写法塞的是临时空 dict，会丢）
+            inp = t["input"]
             if t["action"] == ACTION_GENERATE_SHOT:
                 cons.setdefault("character", char_key)
                 cons.setdefault("scene", scene_key)
+                cons.setdefault("reference_strength", seeded_strength)
+                cons.setdefault("scene_strength", seeded_scene)
+                for k, v in seeded_cons.items():      # 学到手的动作幅度等
+                    cons.setdefault(k, v)
+                for k, v in seeded_inp.items():       # 贴剧本、分辨率/帧率/音量/去黑场
+                    inp.setdefault(k, v)
                 if self.project:
                     # 档案优先：模型自编的键（哪怕是"模型自己编的新键"这种）落到档案里的真键，
                     # 否则镜头拿不到那张人工登记的真参考图，跨镜头锁脸也就无从谈起。
@@ -267,6 +302,8 @@ class LLMPlanner(Planner):
                 if tasks is None:
                     return None
                 state.tasks, state.phase = tasks, "RUN"
+                for msg in getattr(self, "_notes", []):   # 起手参数提示：只有这里拿得到 state
+                    state.log(msg)
             except Exception:
                 return None  # 降级由工厂处理
         for t in state.tasks:
