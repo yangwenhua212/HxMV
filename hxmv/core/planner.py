@@ -197,8 +197,17 @@ class LLMPlanner(Planner):
             elif t["action"] == ACTION_GENERATE_SCENE:
                 scene_key = cons.get("scene_key") or cons.get("scene") or inp.get("prompt")
         if self.project:
-            char_key = char_key or next(iter(self.project.characters), None)
-            scene_key = scene_key or next(iter(self.project.scenes), None)
+            # 项目档案优先（与 MockPlanner 同一原则）：档案里已有角色/场景键就沿用。
+            # 不这么做的话，模型每轮 run 给的**新**键都会让系统去新建一个角色/场景
+            # ——"同一个角色跨镜头"就崩了，人工登记的真参考图（图生视频的首帧）也用不上。
+            archived_char = next(iter(self.project.characters), None)
+            archived_scene = next(iter(self.project.scenes), None)
+            if archived_char and char_key not in self.project.characters:
+                char_key = archived_char      # 模型给的新键不在档案里 → 落到档案里的那个
+            if archived_scene and scene_key not in self.project.scenes:
+                scene_key = archived_scene
+            char_key = char_key or archived_char
+            scene_key = scene_key or archived_scene
 
         tasks: list[Task] = []
         for t in items:
@@ -207,6 +216,13 @@ class LLMPlanner(Planner):
             if t["action"] == ACTION_GENERATE_SHOT:
                 cons.setdefault("character", char_key)
                 cons.setdefault("scene", scene_key)
+                if self.project:
+                    # 档案优先：模型自编的键（哪怕是"模型自己编的新键"这种）落到档案里的真键，
+                    # 否则镜头拿不到那张人工登记的真参考图，跨镜头锁脸也就无从谈起。
+                    if char_key and cons.get("character") not in self.project.characters:
+                        cons["character"] = char_key
+                    if scene_key and cons.get("scene") not in self.project.scenes:
+                        cons["scene"] = scene_key
                 cons = {k: v for k, v in cons.items() if v}
             tasks.append(Task(
                 action=t["action"],

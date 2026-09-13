@@ -27,8 +27,12 @@ import time
 PROJECTS_DIR = os.environ.get("HXMV_PROJECTS", os.path.expanduser("~/.hxmv/projects"))
 
 # 参与指纹的参数（决定"这一帧画面长什么样"的全部输入）
+# 指纹白名单：**只放真会改变产物内容的参数**。漏一个的后果是灾难性的——
+# 修正改了它、指纹却没变 → 命中缓存复用旧文件 → 修了等于没修（实测踩过两次：
+# with_audio 开音轨、_semantic_guard 改提示词，都被静默忽略）。
 _FP_KEYS = ("prompt", "duration", "resolution", "fps", "seed", "reference_strength",
-            "motion_scale", "audio_gain_db", "trim_black", "character", "scene", "style")
+            "motion_scale", "audio_gain_db", "trim_black", "character", "scene", "style",
+            "with_audio", "_semantic_guard", "scene_strength")
 
 
 def fingerprint(params: dict) -> str:
