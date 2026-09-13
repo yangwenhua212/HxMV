@@ -255,6 +255,13 @@ function hx(path, opts = {}) {
   return fetch(path, opts);
 }
 function sseUrl(path) { return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN); }
+// 拉接口并保证拿到真数据：401（没填/填错令牌）等错误在这里抛出真实原因，
+// 别让页面把「{error:...}」当成正常数据渲染出 undefined（真机出现过「🧠 undefined 条经验」）
+async function apiGet(path) {
+  const d = await (await hx(path)).json();
+  if (d && d.error) throw new Error(d.error);
+  return d;
+}
 
 // 页面上直接填令牌（原来只能靠 ?token= 进网址，没填就等于用不了）
 async function refreshConn() {
@@ -310,24 +317,27 @@ function hint(msg, isErr) {
 // ---------- 大脑 ----------
 async function refreshBrain() {
   try {
-    const d = await (await hx("/api/brain")).json();
+    const d = await apiGet("/api/brain");
     $("brainBadge").textContent = `🧠 ${d.size} 条经验`;
     const box = $("brainList");
-    if (!d.entries.length) { box.innerHTML = '<div class="empty">跑一次就会开始积累</div>'; return; }
+    if (!(d.entries || []).length) { box.innerHTML = '<div class="empty">跑一次就会开始积累</div>'; return; }
     box.innerHTML = d.entries.map(e =>
       `<div class="bentry">` +
       (e.hits_3 ? '<span class="pill green">已沉淀</span>' : `<span class="pill purple">${e.kind === "LESSON" ? "经验" : "事实"}</span>`) +
       `<span class="imp">×${e.hit_count}</span>` +
       `<span class="c">${esc(zhContent(e.content))}</span></div>`).join("");
-  } catch (e) {}
+  } catch (e) {
+    // 没连上时明确说状态，别渲染出 undefined / 一直空着
+    $("brainBadge").textContent = TOKEN ? "连不上" : "未填令牌";
+  }
 }
 
 // ---------- 历史 ----------
 async function refreshRuns() {
   try {
-    const d = await (await hx("/api/runs")).json();
+    const d = await apiGet("/api/runs");
     const box = $("runsList");
-    if (!d.runs.length) { box.innerHTML = '<div class="empty">暂无</div>'; return; }
+    if (!(d.runs || []).length) { box.innerHTML = '<div class="empty">暂无</div>'; return; }
     box.innerHTML = d.runs.map(r => {
       const t = r.tail || {};
       const running = r.status !== "done";
@@ -339,7 +349,9 @@ async function refreshRuns() {
         <span class="g"><span class="dot ${running ? "running" : "done"}"></span>${esc(r.goal.slice(0, 30))}</span>
         <span class="s">${ts} · ${stat}</span></div>`;
     }).join("");
-  } catch (e) {}
+  } catch (e) {
+    $("runsList").innerHTML = `<div class="empty">${TOKEN ? "连不上" : "未填令牌"}</div>`;
+  }
 }
 
 // ---------- 渲染事件 ----------
@@ -407,7 +419,10 @@ async function submitRun() {
     if (res.error) throw new Error(res.error);
     startStream(res.run_id);
   } catch (e) {
-    hint("提交失败，请重试", true);
+    // 要把真实原因说出来（实测：只显示「请重试」时用户只会反复点）
+    const why = (e && e.message ? String(e.message) : "").trim();
+    hint(/unauthorized/i.test(why) ? "还没连上：先在「连接」卡填令牌"
+                                   : (why ? "提交失败：" + why : "提交失败，请重试"), true);
   }
   $("runBtn").disabled = false; $("runBtn").textContent = "开始生产";
 }
