@@ -50,6 +50,11 @@ jobs:
           python -m hxmv --provider mock --fresh --brain /tmp/ci_brain.json \
             "一只小猫在花园里追蝴蝶，5 秒钟"
 
+      - name: 并行批次冒烟（HXMV_PARALLEL=2，结果必须与串行等价）
+        run: |
+          python -m hxmv --provider mock --fresh --parallel 2 --brain /tmp/ci_par.json \
+            "一只小猫在花园里追蝴蝶，5 秒钟"
+
       - name: 部署自检（硬项不得失败）
         # doctor 必须如实报绿：它说"可以跑"就得真能跑
         run: python -m hxmv --doctor

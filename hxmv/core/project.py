@@ -22,6 +22,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
+import threading
 import time
 
 PROJECTS_DIR = os.environ.get("HXMV_PROJECTS", os.path.expanduser("~/.hxmv/projects"))
@@ -70,8 +72,17 @@ def fingerprint(params: dict) -> str:
 
 
 class Project:
+    """项目档案。
+
+    **线程安全**：多镜头并行时，每个并发的 provider 副本都会登记镜头（register_shot）、
+    命中查询（shot/best_for）与落盘（save）。这里用可重入锁把"读改写"整体串起来——
+    不加锁的后果不是"偶尔丢条记录"，而是 project.json 被两个线程写成交错的坏 JSON，
+    下次 load 直接判成空档案（整个项目的记忆一次性归零）。
+    """
+
     def __init__(self, pid: str, data: dict | None = None):
         self.id = pid
+        self._lock = threading.RLock()      # 可重入：save 会在 register_shot 内部被调用
         d = data or {}
         self.title: str = d.get("title") or pid
         self.style: str = d.get("style") or "cinematic"
@@ -114,22 +125,42 @@ class Project:
         return out
 
     def save(self) -> None:
-        os.makedirs(self.dir, exist_ok=True)
-        self.updated = time.time()
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"id": self.id, "title": self.title, "style": self.style,
-                       "characters": self.characters, "scenes": self.scenes,
-                       "shots": self.shots, "episodes": self.episodes,
-                       "created": self.created, "updated": self.updated},
-                      f, ensure_ascii=False, indent=1)
+        """落盘：**原子替换**（同目录临时文件 + `os.replace`）。
+
+        并发镜头几乎同时登记，每次都要 save。直接 `open(path, "w")` 有两个真问题：
+        ① 两个线程同时写同一文件 → 内容交错成坏 JSON；
+        ② 另一个线程/进程正读到一半 → JSONDecodeError，档案被判成空（记忆一次性归零）。
+        原子替换让读到的永远是"完整旧版"或"完整新版"，不存在中间态。
+        """
+        with self._lock:
+            os.makedirs(self.dir, exist_ok=True)
+            self.updated = time.time()
+            data = {"id": self.id, "title": self.title, "style": self.style,
+                    "characters": self.characters, "scenes": self.scenes,
+                    "shots": self.shots, "episodes": self.episodes,
+                    "created": self.created, "updated": self.updated}
+            fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".project-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=1)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self.path)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
 
     # ---------- 资产（角色/场景）：先查档，命中就不重新生成 ----------
     def asset(self, kind: str, key: str) -> dict | None:
-        book = self.characters if kind == "character" else self.scenes
-        hit = book.get(key)
-        if hit and os.path.isfile(hit.get("path", "")):
-            return hit
-        return None
+        with self._lock:
+            book = self.characters if kind == "character" else self.scenes
+            hit = book.get(key)
+            if hit and os.path.isfile(hit.get("path", "")):
+                return hit
+            return None
 
     def prune(self) -> None:
         """清掉指向已不存在文件的档案项（用户删了产物目录也不至于一直命中空气）。"""
@@ -192,17 +223,20 @@ class Project:
 
     # ---------- 镜头：指纹命中 = 复用文件，跳过生成 ----------
     def shot(self, fp: str) -> dict | None:
-        hit = self.shots.get(fp)
-        if hit and os.path.isfile(hit.get("path", "")):
-            return hit
-        return None
+        with self._lock:
+            hit = self.shots.get(fp)
+            if hit and os.path.isfile(hit.get("path", "")):
+                return hit
+            return None
 
     def register_shot(self, fp: str, path: str, episode: int | None = None, **meta) -> None:
-        entry = self.shots.setdefault(fp, {"episodes": []})
-        entry.update({"path": path, "updated": time.time(), **meta})
-        if episode is not None and episode not in entry["episodes"]:
-            entry["episodes"].append(episode)
-        self.save()
+        # 读改写整体在锁内：并发镜头各登记各的指纹，缺锁会互相覆盖 dict 条目
+        with self._lock:
+            entry = self.shots.setdefault(fp, {"episodes": []})
+            entry.update({"path": path, "updated": time.time(), **meta})
+            if episode is not None and episode not in entry["episodes"]:
+                entry["episodes"].append(episode)
+            self.save()
 
     def best_for(self, prompt: str, character: str | None = None,
                  scene: str | None = None, style: str | None = None) -> dict | None:
@@ -212,22 +246,26 @@ class Project:
         （实测：0.8 → 0.7 → 0.9），指纹就永远对不上、每次都在重画。
         剧情身份才是"这是不是同一集同一个镜头"的正确判据——命中就沿用上次那版的参数，
         指纹随即命中，**一张新画面都不生成**。具体档案优先于泛化经验。
+
+        加锁不只是为了数据竞争：这里在**迭代** self.shots，而并发镜头正在往同一个 dict
+        里 register_shot → 无锁时会直接抛 "dictionary changed size during iteration"。
         """
         if not (character or scene):
             return None
-        for entry in sorted(self.shots.values(), key=lambda e: e.get("updated", 0), reverse=True):
-            ti = entry.get("task_input") or {}
-            tc = entry.get("task_constraints") or {}
-            if ti.get("prompt") != prompt:
-                continue
-            if character and tc.get("character") != character:
-                continue
-            if scene and tc.get("scene") != scene:
-                continue
-            if style and tc.get("style") != style:
-                continue
-            return entry
-        return None
+        with self._lock:
+            for entry in sorted(self.shots.values(), key=lambda e: e.get("updated", 0), reverse=True):
+                ti = entry.get("task_input") or {}
+                tc = entry.get("task_constraints") or {}
+                if ti.get("prompt") != prompt:
+                    continue
+                if character and tc.get("character") != character:
+                    continue
+                if scene and tc.get("scene") != scene:
+                    continue
+                if style and tc.get("style") != style:
+                    continue
+                return entry
+            return None
 
     # ---------- 分集 ----------
     def add_episode(self, goal: str, outputs: list[str], episode: int | None = None) -> None:

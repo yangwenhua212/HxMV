@@ -34,8 +34,20 @@ COST_PER_ACTION = {
 
 
 class Executor:
+    # 能否被多个任务**同时**调用（默认不许：绝大多数执行器带实例状态）
+    parallel_safe = False
+
     def execute(self, task: Task) -> dict:
         raise NotImplementedError
+
+    def for_concurrent(self) -> "Executor | None":
+        """派生一个可并发使用的副本；不支持并发时返回 None。
+
+        为什么必须"派生"而不是直接共享实例：provider 自带缓存与产物目录状态
+        （local_render 的资产缓存、zhipu 的本地中转目录），多线程共享同一实例会互相踩。
+        派生出来的副本共享**档案与输出目录**（那些地方另有锁），但独占自己的缓存。
+        """
+        return None
 
 
 class MockVideoExecutor(Executor):
@@ -45,8 +57,15 @@ class MockVideoExecutor(Executor):
     表现为不重新抽缺陷），演示"接着做、不重新出画面"的行为。
     """
 
+    # mock 执行器没有实例级可变状态（随机数按 task 哈希现算，档案写有 Project 锁）
+    # → 可以直接共享自己，不需要派生副本。这也让并发路径在零 Key 环境下可被测试覆盖。
+    parallel_safe = True
+
     def __init__(self, project=None):
         self.project = project
+
+    def for_concurrent(self) -> "MockVideoExecutor":
+        return self                     # 无状态，共享即可
 
     def _rng(self, task: Task) -> random.Random:
         h = hashlib.md5(f"{task.task_id}:{task.retry_policy.get('attempts', 0)}:{task.input}".encode()).hexdigest()
@@ -159,8 +178,24 @@ _PROJECTION = {
 class ProviderExecutor(Executor):
     """把 Task 投影成 API 请求参数后交给 VideoProvider 执行。"""
 
-    def __init__(self, provider):
+    def __init__(self, provider, factory=None):
         self.provider = provider
+        # factory：重建一个同款 provider 的工厂（并发时给每个任务独占实例用）。
+        # 没有它就只能串行——这是刻意的"默认安全"。
+        self._factory = factory
+
+    @property
+    def parallel_safe(self) -> bool:
+        """能并发 = provider 自己声明了并行安全 **且** 能重建实例。
+
+        两个条件缺一不可：只声明安全但共享实例仍会踩缓存；
+        只有工厂但 provider 内部有非线程安全的服务端会话，也会炸。
+        """
+        return bool(self._factory) and bool(getattr(self.provider, "parallel_safe", False))
+
+    def for_concurrent(self) -> "ProviderExecutor | None":
+        return (ProviderExecutor(self._factory(), factory=self._factory)
+                if self.parallel_safe else None)
 
     def execute(self, task: Task) -> dict:
         api_task = replace(task)
@@ -215,15 +250,20 @@ def make_executor(project=None, episode: int | None = None):
                 return MockVideoExecutor(project=project)
             if name == "local":
                 from ..providers.local_render import LocalRenderProvider
-                return ProviderExecutor(LocalRenderProvider(project=project))
+                return ProviderExecutor(LocalRenderProvider(project=project),
+                                        factory=lambda: LocalRenderProvider(project=project))
             if name == "fake":
                 from ..providers.fake_api import FakeApiProvider
-                return ProviderExecutor(FakeApiProvider(project=project))
+                return ProviderExecutor(FakeApiProvider(project=project),
+                                        factory=lambda: FakeApiProvider(project=project))
             if name in ("zhipu", "bigmodel", "cogvideo"):
                 from ..providers.zhipu_video import ZhipuVideoProvider
-                return ProviderExecutor(ZhipuVideoProvider(project=project))
+                return ProviderExecutor(ZhipuVideoProvider(project=project),
+                                        factory=lambda: ZhipuVideoProvider(project=project))
             if name in ("kling", "klingai"):
                 from ..providers.kling_example import KlingStyleProvider
+                # 可灵适配器还是骨架（TODO 未实现），且并发提交会撞它的配额——
+                # 明确不给工厂：宁可不并行，也不要给用户一个会 429 的"加速"
                 return ProviderExecutor(KlingStyleProvider(project=project))
             raise ProviderError(f"未知 provider: {name}", retryable=False)
         except ProviderError as e:

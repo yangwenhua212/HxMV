@@ -29,6 +29,7 @@ import hashlib
 import os
 import random
 import sys
+import threading
 import time
 
 from ..media import probe
@@ -48,6 +49,12 @@ DRIFT_BRIGHT = 0.12      # (1-strength) × 该值 = 亮度偏移（保证任何�
 DRIFT_CONTRAST = 0.25    # (1-strength) × 该值 = 对比度衰减
 MOTION_ZOOM = 1.15       # 有运镜时的固定推镜倍数（给平移留出余量）
 BLACK_HEAD_SECONDS = 0.3  # 片头全黑段（未被 trim_black 修掉时真的会出现黑帧）
+
+# 并发镜头会同时要**同一张**参考图 / 基线帧 / 漂移图（同名同路径），
+# 两个线程同时判定"文件不存在"→ 同时渲染 → 同时写同一个文件（可能写出坏文件，
+# 或者一个线程读到写了一半的 PNG）。锁必须覆盖"检查"那一刻——check-then-act
+# 的竞态就出在检查上；只在写的时候加锁是挡不住的。
+_FILE_LOCK = threading.Lock()
 
 
 def font_file() -> str | None:
@@ -101,6 +108,8 @@ _PALETTE = [
 
 class LocalRenderProvider(VideoProvider):
     name = "local"
+    # 产物按 task_id 命名互不冲突；共用路径（参考图/基线帧/漂移图）由 _FILE_LOCK 串行化
+    parallel_safe = True
     action_map = {"GENERATE_SHOT": "render", "GENERATE_SCENE": "render",
                   "GENERATE_CHARACTER": "render", "COMPOSE": "concat"}
 
@@ -154,38 +163,45 @@ class LocalRenderProvider(VideoProvider):
         """
         if key in self._assets:
             return self._assets[key]
-        if self.project:
-            hit = self.project.asset(kind, key)
-            if hit:
-                self._assets[key] = hit["path"]
-                self._reused_assets.append(f"{kind}:{key}")
-                return hit["path"]
-        h = int(hashlib.md5(key.encode()).hexdigest()[:6], 16)
-        c0, c1 = _PALETTE[h % len(_PALETTE)]
-        w, hgt = BASE_RESOLUTION
         path = os.path.join(self.outdir, f"asset_{key}.png")
-        hue = (h % 12) * 30                              # 每个 key 一个专属色调
-        sat = 0.6 + (h % 5) * 0.08
-        x1 = 0.2 + (h % 70) / 100.0
-        y1 = 0.2 + ((h // 7) % 70) / 100.0
-        self._ff([
-            "-f", "lavfi", "-i", f"testsrc2=s={w}x{hgt}:d=1",
-            "-f", "lavfi", "-i",
-            f"gradients=s={w}x{hgt}:duration=1:c0={c0}:c1={c1}:x0=0.1:y0=0.1:x1={x1:.2f}:y1={y1:.2f}",
-            "-filter_complex",
-            f"[0:v]hue=h={hue}:s={sat}[a];[1:v]format=rgb24[b];"
-            f"[a][b]blend=all_mode=softlight:all_opacity=0.85,"
-            f"{drawtext(key, 'x=(w-text_w)/2:y=h-text_h-16')},"
-            f"format=rgb24[out]",
-            "-map", "[out]", "-frames:v", "1", path,
-        ])
-        self._assets[key] = path
-        if self.project:
-            # placeholder=True 很关键：这是**系统造的占位素材**（色卡 + 键名），不是用户传的
-            # 参考图。真实模型 provider（智谱/可灵）拿到它会当首帧发给模型 → 等于让模型照色卡
-            # 发挥，一致性检查也是拿色卡当基准（等于没检查）。标记出来，下游据此跳过。
-            self.project.register_asset(kind, key, path, name=key,
-                                        style=self.project.style, placeholder=True)
+        with _FILE_LOCK:
+            # 锁内**复查**两处：别的并发镜头可能刚登记了档案、或刚把这张图渲染出来。
+            # 不复查的话，两个线程会同时渲染同一张图、写同一个文件（写出坏 PNG，
+            # 而"坏 PNG"在下游表现为"参考图读不出来"，很难定位到这里）。
+            if self.project:
+                hit = self.project.asset(kind, key)
+                if hit:
+                    self._assets[key] = hit["path"]
+                    self._reused_assets.append(f"{kind}:{key}")
+                    return hit["path"]
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                self._assets[key] = path
+                return path
+            h = int(hashlib.md5(key.encode()).hexdigest()[:6], 16)
+            c0, c1 = _PALETTE[h % len(_PALETTE)]
+            w, hgt = BASE_RESOLUTION
+            hue = (h % 12) * 30                          # 每个 key 一个专属色调
+            sat = 0.6 + (h % 5) * 0.08
+            x1 = 0.2 + (h % 70) / 100.0
+            y1 = 0.2 + ((h // 7) % 70) / 100.0
+            self._ff([
+                "-f", "lavfi", "-i", f"testsrc2=s={w}x{hgt}:d=1",
+                "-f", "lavfi", "-i",
+                f"gradients=s={w}x{hgt}:duration=1:c0={c0}:c1={c1}:x0=0.1:y0=0.1:x1={x1:.2f}:y1={y1:.2f}",
+                "-filter_complex",
+                f"[0:v]hue=h={hue}:s={sat}[a];[1:v]format=rgb24[b];"
+                f"[a][b]blend=all_mode=softlight:all_opacity=0.85,"
+                f"{drawtext(key, 'x=(w-text_w)/2:y=h-text_h-16')},"
+                f"format=rgb24[out]",
+                "-map", "[out]", "-frames:v", "1", path,
+            ])
+            self._assets[key] = path
+            if self.project:
+                # placeholder=True 很关键：这是**系统造的占位素材**（色卡 + 键名），不是用户传的
+                # 参考图。真实模型 provider（智谱/可灵）拿到它会当首帧发给模型 → 等于让模型照色卡
+                # 发挥，一致性检查也是拿色卡当基准（等于没检查）。标记出来，下游据此跳过。
+                self.project.register_asset(kind, key, path, name=key,
+                                            style=self.project.style, placeholder=True)
         return path
 
     def _reference_for(self, task) -> tuple[str | None, str | None]:
@@ -207,15 +223,18 @@ class LocalRenderProvider(VideoProvider):
                             f"base_{w}x{hgt}_{os.path.splitext(os.path.basename(ref))[0]}.png")
         if os.path.exists(path):
             return path
-        tmp = os.path.join(self.outdir,
-                           f"_basetmp_{w}x{hgt}_{os.path.splitext(os.path.basename(ref))[0]}.mp4")
-        # 居中裁切（x/y 都取正中）= 运镜在 50% 时刻的画面几何，与一致性采样点对齐
-        self._ff(["-loop", "1", "-i", ref, "-frames:v", "1",
-                  "-vf", (f"zoompan=z='{MOTION_ZOOM}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                          f":d=1:s={w}x{hgt},format=yuv420p"),
-                  *probe.encoder_args(26), tmp])
-        self._ff(["-i", tmp, "-frames:v", "1", path])
-        os.remove(tmp)
+        with _FILE_LOCK:            # 锁内复查：并发的另一个镜头可能刚把这张基线做好
+            if os.path.exists(path):
+                return path
+            tmp = os.path.join(self.outdir,
+                               f"_basetmp_{w}x{hgt}_{os.path.splitext(os.path.basename(ref))[0]}.mp4")
+            # 居中裁切（x/y 都取正中）= 运镜在 50% 时刻的画面几何，与一致性采样点对齐
+            self._ff(["-loop", "1", "-i", ref, "-frames:v", "1",
+                      "-vf", (f"zoompan=z='{MOTION_ZOOM}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                              f":d=1:s={w}x{hgt},format=yuv420p"),
+                      *probe.encoder_args(26), tmp])
+            self._ff(["-i", tmp, "-frames:v", "1", path])
+            os.remove(tmp)
         return path
 
     # ---------- 漂移参考图：色彩/噪声偏离参考图（一致性缺陷的真实来源） ----------
@@ -230,13 +249,16 @@ class LocalRenderProvider(VideoProvider):
         path = os.path.join(self.outdir, f"drift{round(strength * 100):03d}_{os.path.basename(ref)}")
         if os.path.exists(path) or drift <= 0.001:
             return path if os.path.exists(path) else ref
-        self._ff([
-            "-i", ref, "-frames:v", "1", "-vf",
-            f"hue=h={drift * DRIFT_HUE_DEG:.1f}:s={1 - drift * DRIFT_SAT_RANGE:.3f},"
-            f"eq=brightness={drift * DRIFT_BRIGHT:.3f}:contrast={1 - drift * DRIFT_CONTRAST:.3f},"
-            f"noise=alls={max(1, round(drift * DRIFT_NOISE))}:allf=t,"
-            f"format=yuv420p,format=rgb24", path,
-        ])
+        with _FILE_LOCK:            # 两个镜头用同一强度时，文件名相同 → 锁内复查再渲染
+            if os.path.exists(path):
+                return path
+            self._ff([
+                "-i", ref, "-frames:v", "1", "-vf",
+                f"hue=h={drift * DRIFT_HUE_DEG:.1f}:s={1 - drift * DRIFT_SAT_RANGE:.3f},"
+                f"eq=brightness={drift * DRIFT_BRIGHT:.3f}:contrast={1 - drift * DRIFT_CONTRAST:.3f},"
+                f"noise=alls={max(1, round(drift * DRIFT_NOISE))}:allf=t,"
+                f"format=yuv420p,format=rgb24", path,
+            ])
         return path
 
     # ---------- 镜头：真渲染（参数真的决定质量） ----------

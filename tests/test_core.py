@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -353,6 +354,113 @@ class PipelineCriticTest(unittest.TestCase):
         # 异常层不得静默消失：合并报告的 detail 里必须留下证据
         merged = c.evaluate(Task("GENERATE_SHOT"), {})
         self.assertIn("未完成判定", merged.detail)
+
+
+# ------------------------------------------- 批次并行：结果必须与串行等价（v0.8）
+class BatchExecutionTest(unittest.TestCase):
+    """并行的唯一正当理由是"快"，**绝不能改变结论**。这个类守的就是这条线。
+
+    注意为什么必须用**固定 task_id**：mock 世界的缺陷是按 task_id 哈希抽的，
+    两次独立 run 的 task_id 不同 → 缺陷不同 → 根本没法对比。
+    固定 id 之后，"逐个串行执行"与"并发批次"必须给出逐字段一致的结果。
+    """
+
+    @staticmethod
+    def _tasks(n: int = 2):
+        return [Task("GENERATE_SHOT", task_id=f"fixed{i:04d}",
+                     input={"prompt": f"镜头{i}", "duration": 5, "seed": 100 + i},
+                     constraints={"character": "cat", "scene": "s01",
+                                  "reference_strength": 0.4})
+                for i in range(n)]
+
+    def test_parallel_matches_serial_one_by_one(self):
+        from hxmv.core.executor import MockVideoExecutor
+        from hxmv.core.loop import _execute_batch, _execute_one
+        from hxmv.core.state import ExecutionState
+
+        tasks = self._tasks(2)
+        serial_state = ExecutionState(goal="g")
+        serial = {t.task_id: _execute_one(MockVideoExecutor(), t, serial_state,
+                                         lambda e: None, False, 4, threading.Lock())
+                  for t in tasks}
+
+        par_state = ExecutionState(goal="g")
+        parallel = _execute_batch(MockVideoExecutor(), list(tasks), par_state,
+                                  lambda e: None, False, 4, threading.Lock())
+
+        self.assertEqual(set(serial), set(parallel))
+        for key, (res_serial, _) in serial.items():
+            res_par, _err = parallel[key]
+            self.assertEqual(res_serial["defects"], res_par["defects"], f"{key} 缺陷集不一致")
+            self.assertEqual(res_serial["media"], res_par["media"])
+            self.assertEqual(res_serial["fingerprint"], res_par["fingerprint"])
+
+    def test_budget_is_not_lost_under_concurrent_failures(self):
+        """并发失败任务的计费一次都不能少。
+
+        `state.budget.used += cost` 不是原子操作：没有锁时并发会丢增量，
+        而预算护栏护的正是"真花钱"的地方（丢计费 = 护栏形同虚设）。
+        """
+        from hxmv.core.executor import Executor
+        from hxmv.core.loop import _execute_batch
+        from hxmv.core.state import ExecutionState
+        from hxmv.providers.base import ProviderError
+
+        class _AlwaysFailing(Executor):
+            parallel_safe = True
+
+            def execute(self, task):
+                raise ProviderError("服务不可用", retryable=False, cost_units=1.0)
+
+            def for_concurrent(self):
+                return self
+
+        state = ExecutionState(goal="g")
+        out = _execute_batch(_AlwaysFailing(), self._tasks(8), state,
+                             lambda e: None, False, 4, threading.Lock())
+        self.assertEqual(len(out), 8)
+        self.assertTrue(all(result is None for result, _ in out.values()))
+        self.assertAlmostEqual(state.budget.used, 8.0, places=6)   # 8 次失败，一次不漏
+
+    def test_project_file_survives_concurrent_registration(self):
+        """并发登记镜头后，project.json 必须仍是合法 JSON 且**一条不丢**。
+
+        无锁时两个线程同时 open(path, "w") 会把内容写成交错的坏 JSON，
+        下次 load 直接判成空档案——整个项目的记忆一次性归零（最难查的那种事故）。
+        """
+        import hxmv.core.project as proj_mod
+        from concurrent.futures import ThreadPoolExecutor as Pool
+
+        old_dir = proj_mod.PROJECTS_DIR
+        tmp = tempfile.mkdtemp(prefix="hxmv_proj_")
+        proj_mod.PROJECTS_DIR = tmp
+        try:
+            project = proj_mod.Project("parallel")
+            with Pool(max_workers=8) as pool:
+                list(pool.map(
+                    lambda i: project.register_shot(f"fp{i:04d}", f"/tmp/s{i}.mp4"),
+                    range(40)))
+            reloaded = proj_mod.Project.load("parallel")     # load 失败会返回空档案
+            self.assertEqual(len(reloaded.shots), 40)
+        finally:
+            proj_mod.PROJECTS_DIR = old_dir
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_provider_needs_both_declaration_and_factory(self):
+        """ProviderExecutor 的并行许可 = provider 声明 + 能重建实例，缺一不可。"""
+        from hxmv.core.executor import ProviderExecutor
+
+        class _Safe:
+            parallel_safe = True
+
+        class _Unsafe:
+            pass
+
+        self.assertFalse(ProviderExecutor(_Safe()).parallel_safe)          # 有声明、无工厂
+        self.assertTrue(ProviderExecutor(_Safe(), factory=_Safe).parallel_safe)
+        self.assertFalse(ProviderExecutor(_Unsafe(), factory=_Unsafe).parallel_safe)
+        # 不能派生 → for_concurrent 明确返回 None（调用方据此退回串行）
+        self.assertIsNone(ProviderExecutor(_Safe()).for_concurrent())
 
 
 if __name__ == "__main__":
