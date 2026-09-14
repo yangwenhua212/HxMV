@@ -76,6 +76,16 @@
   /* 过程记录折叠：不让几十条事件把成品挤到屏幕外 */
   details.proc > summary { cursor: pointer; color: var(--dim); font-size: 13px; padding: 2px 0 6px; }
   details.proc[open] > summary { margin-bottom: 12px; }
+  /* 对话：跟 HxMV 说需求（像跟人说话一样） */
+  #chatLog { max-height: 300px; overflow-y: auto; margin-bottom: 8px; }
+  .chatMsg { max-width: 88%; padding: 7px 11px; border-radius: 12px; margin: 6px 0; font-size: 14px;
+             line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .chatMsg.me { background: var(--accent); color: #04231b; margin-left: auto; }
+  .chatMsg.mv { background: var(--panel2); border: 1px solid var(--border); }
+  .goBtn { display: block; margin-top: 8px; width: 100%; padding: 8px; border-radius: 10px;
+           background: var(--green); color: #04231b; border: none; font-size: 14px; font-weight: 600; }
+  #discardBtn { background: none; border: 1px solid var(--red); color: var(--red); border-radius: 9px;
+                padding: 5px 11px; font-size: 13px; }
 
   /* 时间线 */
   .ev { border-left: 2px solid var(--border); padding: 1px 0 16px 18px; margin-left: 7px; position: relative; }
@@ -144,6 +154,16 @@
         <button id="connectBtn">连接</button>
         <span id="connStatus">未填令牌</span>
       </div>
+    </div>
+
+    <div class="card" id="chatCard">
+      <h3>对话</h3>
+      <div id="chatLog"></div>
+      <div class="row">
+        <input id="chatInput" placeholder="说一句：想做什么片 / 想改哪里（如「刚才那条改成夜晚，5 秒」）">
+        <button id="chatSend">发送</button>
+      </div>
+      <div id="chatHint"></div>
     </div>
 
     <div class="card" id="submitCard">
@@ -492,7 +512,11 @@ function paintArts(files, runId, rows) {
     if (name.endsWith(".png")) return head + `<img class="art art-img" src="${url}" alt="">`;
     return head;
   }).join("");
-  $("sumBody").innerHTML = (rows || '<div class="empty">本次没有完成任务</div>') + arts;
+  $("sumBody").innerHTML = (rows || '<div class="empty">本次没有完成任务</div>') + arts
+    + '<div class="row" style="margin-top:10px"><button id="discardBtn">不满意，删掉这条</button>'
+    + '<span id="discardHint"></span></div>';
+  const db = $("discardBtn");
+  if (db) db.onclick = () => discardRun(runId);      // 删产物 + 撤销档案登记
 }
 
 // ---------- 回放 ----------
@@ -578,6 +602,53 @@ $("saveKling").onclick = () => saveConfig("kling", "keyKling");
 $("videoModel").onchange = () => saveConfig("zhipu", "keyZhipu");
 $("vlmModel").onchange = () => saveConfig("zhipu", "keyZhipu");
 
+// ---------- 对话（老大要求：HxMV 也要能聊天）----------
+// 说一句话 → 它回一句话 + 给出可执行目标；点「开工」才真的跑。不点就不烧钱、不落档。
+let chatHistory = [];   // 只留在内存：刷新即清（对话不需要长期留档）
+function chatHint(t, bad) { const el = $("chatHint"); el.textContent = t || ""; el.style.color = bad ? "var(--red)" : "var(--dim)"; }
+function chatSay(role, text, goal) {
+  const box = $("chatLog"), el = document.createElement("div");
+  el.className = "chatMsg " + role;
+  el.appendChild(document.createTextNode(text));
+  if (goal) {
+    const b = document.createElement("button");
+    b.className = "goBtn";
+    b.textContent = "开工：" + goal;
+    b.onclick = () => { $("goalInput").value = goal; chatHint("已填进下面的目标框，点「开始生产」就跑（也可先改两字）"); };
+    el.appendChild(b);
+  }
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+async function chatSend() {
+  const msg = $("chatInput").value.trim();
+  if (!msg) return;
+  $("chatInput").value = "";
+  chatSay("me", msg);
+  chatHint("它正在想…");
+  try {
+    const d = await postJson("/api/chat", { message: msg, project: $("projectInput").value.trim(), history: chatHistory });
+    chatHistory.push({ role: "user", content: msg }, { role: "assistant", content: d.reply });
+    chatSay("mv", d.reply, d.goal);
+    chatHint(d.llm === false ? "（没配模型 Key：先按你的原话开工）" : "");
+  } catch (e) { chatHint(e.message, true); }
+}
+$("chatSend").onclick = chatSend;
+$("chatInput").addEventListener("keydown", e => { if (e.key === "Enter") chatSend(); });
+
+// 不满意就删：删产物 + 撤销它在项目档案里的登记（别再当作设定影响后面）
+async function discardRun(runId) {
+  if (!runId) return;
+  if (!confirm("删掉这次跑的所有片子，并从项目档案里撤销它的登记？")) return;
+  const hint = $("discardHint");
+  if (hint) hint.textContent = "正在删…";
+  try {
+    const d = await postJson("/api/discard", { run_id: runId });
+    if (hint) hint.textContent = "已删：" + d.removed_files + " 个文件，撤销 " + d.removed_records + " 条登记";
+    $("sumBox").style.display = "none";
+    refreshRuns();
+  } catch (e) { if (hint) hint.textContent = e.message; }
+}
 $("runBtn").onclick = submitRun;
 $("goalInput").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitRun(); });
 

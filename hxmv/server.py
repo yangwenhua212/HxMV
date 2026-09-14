@@ -35,6 +35,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -720,6 +721,68 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "vision": {"ready": llm.vision_available(),
                                                    "model": llm.vision_model()}})
             return
+        if u.path == "/api/chat":
+            # 对话入口（老大要求「hxmv 也需要可以聊天」）：一句话 → 回话 + 可执行目标。
+            # 这里**不落盘、不开工**：用户点「开工」才走 /api/run（不点就不烧钱、不落档）。
+            if not self._authed():
+                self._send_err(401, "unauthorized")
+                return
+            from .core import chat as chat_mod
+            from .core import project as project_mod
+            body = self._read_body()
+            message = str(body.get("message", "")).strip()
+            if not message:
+                self._send_err(400, "message 不能为空")
+                return
+            proj = None
+            pid = self._safe_pid(str(body.get("project", "")))
+            if pid:
+                try:
+                    proj = project_mod.Project.load(pid)
+                except Exception:
+                    proj = None
+            history = body.get("history") if isinstance(body.get("history"), list) else []
+            try:
+                out = chat_mod.reply(message, project=proj, recent=_scan_runs(), history=history)
+            except Exception as e:      # 模型挂了也要让他能干活：按原话直接开工
+                out = {"reply": f"模型那边没接上（{e}），先按你说的直接开工。", "goal": message, "llm": False}
+            self._send_json(out)
+            return
+
+        if u.path == "/api/discard":
+            # 「不满意就删」：删掉这次 run 的产物目录 + 撤销它在项目档案里的登记（角色/场景/镜头/集数）。
+            # 为什么要有它：做出来的片子不满意时，用户不该被迫留着它，更不该让它继续当"设定"影响后面。
+            if not self._authed():
+                self._send_err(401, "unauthorized")
+                return
+            from .core import project as project_mod
+            body = self._read_body()
+            run_id = str(body.get("run_id", "")).strip()
+            if not run_id or not run_id.replace("-", "").isalnum():
+                self._send_err(400, "run_id 不合法")
+                return
+            rundir = os.path.join(RUNS_DIR, run_id)
+            if not os.path.isdir(rundir) or run_id in ACTIVE_RUNS:
+                self._send_err(409 if run_id in ACTIVE_RUNS else 404,
+                               "这次还在跑，等它结束再删" if run_id in ACTIVE_RUNS else f"run 不存在: {run_id}")
+                return
+            records = 0
+            for meta in project_mod.Project.list_all():
+                pid = str(meta.get("id") or meta.get("title") or "")
+                if not pid:
+                    continue
+                try:
+                    records += project_mod.Project.load(pid).forget_run(run_id)
+                except Exception:
+                    continue
+            files = 0
+            for _root, _dirs, names in os.walk(rundir):
+                files += len(names)
+            shutil.rmtree(rundir, ignore_errors=True)
+            self._send_json({"ok": True, "run_id": run_id, "removed_files": files,
+                             "removed_records": records})
+            return
+
         if u.path == "/api/ref":
             # **上传参考图**（面板用）：图片走 base64 JSON（std lib 解析 multipart 太脏）。
             # 自动裁主视觉由 media/sheet.py 干；preview=true 只回预览不落库，手机上先看一眼再存。

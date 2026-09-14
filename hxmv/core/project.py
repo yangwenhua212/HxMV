@@ -161,6 +161,33 @@ class Project:
                 pass
         return True
 
+    def forget_run(self, run_id: str) -> int:
+        """撤销某次 run 留下的登记（角色/场景/镜头/集数）——「不满意就删」的正规出口。
+
+        为什么按**产物路径**找而不是按项目名：run 的归属只体现在磁盘上（产物路径里含 run_id），
+        被打断的 run 连 run.done 都没有、查不到项目名。所以让每个项目自己认领"路径在我这儿"的登记。
+        返回撤销的登记条数。
+        """
+        tag = os.sep + str(run_id) + os.sep
+        n = 0
+        for book in (self.characters, self.scenes):
+            for k in [k for k, v in book.items() if tag in str(v.get("path", ""))]:
+                book.pop(k, None)
+                n += 1
+        for k in [k for k, v in self.shots.items() if tag in str(v.get("path", ""))]:
+            self.shots.pop(k, None)
+            n += 1
+        keep = []
+        for ep in self.episodes:
+            if any(tag in str(o) for o in (ep.get("outputs") or [])):
+                n += 1
+                continue
+            keep.append(ep)
+        self.episodes = keep
+        if n:
+            self.save()
+        return n
+
     # ---------- 镜头：指纹命中 = 复用文件，跳过生成 ----------
     def shot(self, fp: str) -> dict | None:
         hit = self.shots.get(fp)

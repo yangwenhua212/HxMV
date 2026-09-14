@@ -32,6 +32,8 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 | `/api/run/<id>/files` | GET | 该 run 产物目录里**真实存在**的文件（磁盘为准，含被判失败但已写出的成片；面板的成片播放器用它） |
 | `/api/config` | GET | **接口配置状态**（面板设置页用）：各 provider 是否配好 Key（只回**脱敏**串，明文永不回传）、`options.video_model`／`options.vlm_model` 当前档位、`vision{ready,model}` |
 | `/api/config` | POST `{provider,key?,video_model?,vlm_model?}` | **保存接口配置**（写入实例本机 `~/.hxmv/config.json`，600）。Key 不回传；档位保存后**立即生效**，不用重启 |
+| `/api/chat` | POST `{message, project?, history?}` | **对话入口**：一句话 → `{reply, goal, llm}`。`goal` 非空时客户端给个「开工」按钮（填进目标框再走 `/api/run`）；**本接口不落盘、不开工、不烧钱**。没配模型 Key 时 `llm:false` 且 `goal` = 用户原话（可跑性是底线） |
+| `/api/discard` | POST `{run_id}` | **不满意就删**：删掉该 run 的产物目录 + 撤销它在项目档案里的登记（角色/场景/镜头/集数）；正在跑的 run 返回 409。返回 `{ok, removed_files, removed_records}` |
 | `/api/ref?project=` | GET | 项目参考图清单：`{characters:[{key,name,exists,placeholder,size,url}],scenes:[…]}`——**`placeholder:true` = 系统造的占位素材（色卡），不是用户传的参考图**（面板会标「占位」，真实模型 provider 不会拿它当首帧）；客户端可直接把 `url` 塞进 `<img>`（记得带 token） |
 | `/api/ref/image?project=&kind=&key=` | GET | 取参考图字节（`kind`=character/scene）。路径只从项目档案里取，不接受外来路径 |
 | `/api/ref` | POST `{project,kind,key,mode?,preview?,image}` | **上传参考图**（图生视频的首帧）。`image` 为 data URL 或裸 base64（≤12MB，JPEG/PNG）；`mode`=auto/crop_top/keep（auto=设定表自动裁上部主视觉）；`preview=true` 只回裁切预览不落库 |
