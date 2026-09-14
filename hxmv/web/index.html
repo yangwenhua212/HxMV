@@ -281,6 +281,16 @@
   .ckRow .ok { background: var(--green); color: #04231b; border: none; font-weight: 600; }
   .ckRow .no { background: none; border: 1px solid var(--red); color: var(--red); }
   .ckNote { font-size: 12px; }
+  /* 参考图抽屉：创作页的「＋」与会话页的入口**共用同一份 UI**（以前「＋」直接跳会话页） */
+  .drawer { position: fixed; inset: 0; z-index: 40; display: flex; justify-content: flex-end; }
+  .drawer[hidden] { display: none; }
+  .drawer-mask { position: absolute; inset: 0; background: rgba(4,10,8,.62); }
+  .drawer-panel { position: relative; width: min(440px, 94vw); height: 100%; overflow-y: auto;
+                  padding: 56px 16px 28px; background: var(--bg); border-left: 1px solid var(--border); }
+  .drawer-close { position: absolute; top: 12px; right: 14px; width: 34px; height: 34px; border-radius: 999px;
+                  border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+                  font-size: 17px; line-height: 1; cursor: pointer; }
+  #refOpenBtn { margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -380,31 +390,10 @@
   </section>
 
   <aside>
-    <div class="card" id="refCard">
+    <div class="card">
       <h3>参考图 · 图生视频的首帧</h3>
-      <div class="row">
-        <select id="refKind">
-          <option value="character">角色</option>
-          <option value="scene">场景</option>
-        </select>
-        <input id="refKey" placeholder="键名（镜头里的角色名／场景名）">
-        <select id="refMode">
-          <option value="auto">自动裁主视觉</option>
-          <option value="crop_top">只取上部</option>
-          <option value="keep">原样不裁</option>
-        </select>
-      </div>
-      <div class="row">
-        <label class="fileBtn" for="refFile">选图片</label>
-        <input id="refFile" type="file" accept="image/*" multiple hidden>
-        <span id="refFileName"></span>
-        <button id="refPreviewBtn">预览</button>
-        <button id="refSaveBtn">存为参考图</button>
-      </div>
-      <div id="refHint"></div>
-      <img id="refPreview" alt="">
-      <div id="refBatch"></div>
-      <div class="refGrid" id="refList"></div>
+      <div class="sub dim">先登记角色/场景图，镜头就从这张图开始动</div>
+      <button class="fileBtn" id="refOpenBtn">打开参考图</button>
     </div>
 
     <div class="card">
@@ -468,6 +457,43 @@
     <button class="bn" data-page="works"><span>▦</span>作品</button>
   </nav>
 </main>
+
+<!-- 参考图抽屉：创作页「＋」与会话页入口共用这一份 UI（id 与原来完全一致，逻辑零改动） -->
+<div id="refDrawer" class="drawer" hidden>
+  <div class="drawer-mask" id="refMask"></div>
+  <div class="drawer-panel">
+    <button class="drawer-close" id="refClose" title="关闭">×</button>
+    <div class="card">
+      <h3>参考图 · 图生视频的首帧</h3>
+      <div class="row">
+        <input id="refProjectInput" placeholder="项目名（这张图挂到哪部片子上）">
+      </div>
+      <div class="row">
+        <select id="refKind">
+          <option value="character">角色</option>
+          <option value="scene">场景</option>
+        </select>
+        <input id="refKey" placeholder="键名（镜头里的角色名／场景名）">
+        <select id="refMode">
+          <option value="auto">自动裁主视觉</option>
+          <option value="crop_top">只取上部</option>
+          <option value="keep">原样不裁</option>
+        </select>
+      </div>
+      <div class="row">
+        <label class="fileBtn" for="refFile">选图片</label>
+        <input id="refFile" type="file" accept="image/*" multiple hidden>
+        <span id="refFileName"></span>
+        <button id="refPreviewBtn">预览</button>
+        <button id="refSaveBtn">存为参考图</button>
+      </div>
+      <div id="refHint"></div>
+      <img id="refPreview" alt="">
+      <div id="refBatch"></div>
+      <div class="refGrid" id="refList"></div>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -880,7 +906,20 @@ function showPage(name) {
 document.querySelectorAll("nav.bottom .bn").forEach(b => { b.onclick = () => showPage(b.dataset.page); });
 $("gearBtn").onclick = () => showPage("settings");
 $("backBtn").onclick = () => showPage("create");
-$("plusBtn").onclick = () => { showPage("session"); refreshRef(); };   // 参考图在会话页
+// 参考图抽屉：创作页「＋」与会话页入口**共用同一份 UI**。
+// 以前「＋」的写法是 showPage("session") —— 用户想传图当素材，结果整页被换掉，
+// 还以为是自己点错了。现在就地打开抽屉，文件选择器就在里面。
+function openRef() {
+  const p = $("refProjectInput");
+  if (!p.value.trim()) p.value = $("projectInput").value.trim();   // 带出已填过的项目名，免得重复输入
+  $("refDrawer").hidden = false;
+  refreshRef();
+}
+function closeRef() { $("refDrawer").hidden = true; }
+$("refOpenBtn").onclick = openRef;
+$("refClose").onclick = closeRef;
+$("refMask").onclick = closeRef;
+$("plusBtn").onclick = openRef;                                        // 就地打开，不跳页
 $("modelBtn").onclick = () => showPage("settings");                    // 档位在设置
 
 // ---------- 创作首页：功能胶囊 + 底部大输入框 ----------
@@ -888,9 +927,9 @@ const ideaTip = (t) => setHint("ideaHint", t);
 const PILL_ACTS = {
   seedance: () => { $("providerSel").value = "zhipu"; ideaTip("已选：智谱 AI 真视频（免费档）"); },
   focus: () => $("ideaInput").focus(),
-  img2video: () => { showPage("session"); refreshRef(); },
+  img2video: openRef,
   multi: () => { $("ideaInput").value = "一个小猴子在花果山翻跟头，多镜头一镜到底，5 秒"; $("ideaInput").focus(); },
-  character: () => { showPage("session"); refreshRef(); },
+  character: openRef,
   project: () => { $("sessionTitle") && ($("sessionTitle").textContent = "续做同一部：先填项目名"); showPage("session"); },
 };
 document.querySelectorAll("#pillList .pill").forEach(b => {
@@ -1008,7 +1047,11 @@ $("goalInput").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ct
 
 // ---------- 参考图（图生视频的首帧）：上传 → 自动裁主视觉 → 落进项目档案 ----------
 const refHint = (msg, isErr) => setHint("refHint", msg, { isErr, prefix: true });
-function refProject() { return $("projectInput").value.trim(); }
+function refProject() {
+  // 抽屉里的项目名优先（创作页没有项目名输入框），回落到会话页那个；
+  // 登记成功后会回写过去，保证"参考图挂的项目"与"生产用的项目"是同一个。
+  return $("refProjectInput").value.trim() || $("projectInput").value.trim();
+}
 // 选中的图片（支持一次多张）：{ file, key } —— key 是要填的键名（镜头里的角色名／场景名）
 let refSel = [];
 function fileData(f) {
@@ -1085,6 +1128,7 @@ async function saveBatch() {
     } catch (e) { fail++; firstErr = firstErr || (key + "：" + e.message); }
   }
   if (btn) btn.disabled = false;
+  if (ok) $("projectInput").value = pid;      // 回写：让"生产"用同一个项目档案
   refHint("批量完成：成功 " + ok + " 张" + (fail ? "，失败 " + fail + " 张 —— " + firstErr : ""), fail > 0);
   refreshRef();
 }
@@ -1099,7 +1143,7 @@ async function refPayload(preview) {
 }
 async function refreshRef() {
   const box = $("refList"), pid = refProject();
-  if (!pid) { box.innerHTML = ""; refHint("上面填了项目名，就能传参考图"); return; }
+  if (!pid) { box.innerHTML = ""; refHint("先填项目名，就能传参考图"); return; }
   let d = { characters: [], scenes: [] };
   try { d = await (await hx("/api/ref?project=" + encodeURIComponent(pid))).json(); } catch (e) {}
   const items = [].concat(
@@ -1107,7 +1151,7 @@ async function refreshRef() {
     (d.scenes || []).map(x => Object.assign({}, x, { kind: "scene", label: "场景" })));
   if (!items.length) {
     box.innerHTML = '<div class="empty">这个项目还没有参考图——传一张，镜头就从它开始动</div>';
-    refHint("上面填了项目名，就能传参考图");
+    refHint("先填项目名，就能传参考图");
     return;
   }
   box.innerHTML = "";
@@ -1145,6 +1189,7 @@ $("refSaveBtn").onclick = async () => {
     const img = $("refPreview");
     img.src = withToken("/api/ref/image?project=" + encodeURIComponent(d.project) + "&kind=" + d.kind + "&key=" + encodeURIComponent(d.key));
     img.style.display = "block";
+    $("projectInput").value = d.project;    // 回写：让"生产"用同一个项目档案
     refHint("已登记 " + d.out_size[0] + "×" + d.out_size[1] + "：跑生产时不要用 --fresh，否则档案会被清掉");
     refreshRef();
   } catch (e) { refHint(e.message, true); }
