@@ -171,14 +171,14 @@ class ZhipuVideoProvider(VideoProvider):
         except Exception:
             return text
 
-    def _asset_prompt(self, task, kind: str) -> str:
+    def _asset_prompt(self, task, kind: str, desc: str | None = None) -> str:
         """设定表 / 定帧的提示词。
 
         角色为什么给「设定表」而不是单张图：标杆就是三视图 + 表情 + 动作那类设定表，
         单张图锁不住设计（换个角度就变样）。设定表是**设计基准**，
         所以它不当首帧用（网格画面喂给视频模型，片子里就会真的出现格子）。
         """
-        desc = self._describe(str(task.input.get("prompt") or "").strip(), kind)
+        desc = desc if desc is not None else self._describe(str(task.input.get("prompt") or "").strip(), kind)
         style = str(task.constraints.get("style") or "cinematic, film-like color").strip()
         if kind == "character":
             return (
@@ -203,7 +203,8 @@ class ZhipuVideoProvider(VideoProvider):
 
         kind = "character" if task.action == "GENERATE_CHARACTER" else "scene"
         key = str(task.constraints.get("asset_key") or task.constraints.get("scene_key") or task.task_id)
-        prompt = self._asset_prompt(task, kind)
+        desc = self._describe(str(task.input.get("prompt") or "").strip(), kind)
+        prompt = self._asset_prompt(task, kind, desc)
         fp = fingerprint({"prompt": f"asset|{kind}|{key}|{prompt}", "model": IMAGE_MODEL})
         if self.project:
             hit = self.project.shot(fp)
@@ -242,10 +243,62 @@ class ZhipuVideoProvider(VideoProvider):
                 style=self.project.style,
                 sheet=(kind == "character"),
                 image_model=IMAGE_MODEL,
+                desc=desc,                     # 美术描述留存：镜头首帧要拿它复现同一个角色/场景
             )
             self.project.register_shot(fp, path, episode=self.episode,
                                        result={k: v for k, v in result.items() if k != "cost_units"})
         return result
+
+    def _project_desc(self, kind: str, key) -> str:
+        """取档案里这个角色/场景的**美术描述**（出资产图时写下来的）→ 镜头首帧复用它。"""
+        if not (self.project and key):
+            return ""
+        hit = self.project.asset(kind, str(key)) or {}
+        return str(hit.get("desc") or "").strip()
+
+    def _shot_keyframe(self, task, prompt: str) -> tuple[str | None, str | None]:
+        """按镜头生成「角色定妆首帧」：角色 + 场景 + 这一镜的画面 → 一张静帧 → 再图生视频。
+
+        为什么必须这么做（实测）：首帧只给场景图、或干脆不给图时，模型全凭文字自由发挥 →
+        评审反复判 character_mismatch（大脑里 18 条修不掉的经验就是这个）。
+        图生视频的**一致性抓手就是首帧本身**：首帧里角色对了，后面整段才有硬约束。
+        """
+        from ..core.project import fingerprint
+
+        cons, inp = task.constraints, task.input
+        char_desc = self._project_desc("character", cons.get("character"))
+        scene_desc = self._project_desc("scene", cons.get("scene"))
+        style = str(cons.get("style") or "").strip()
+        bits = [f"Cinematic film still, the first frame of a video shot. {str(inp.get('prompt') or '').strip()}."]
+        if char_desc:
+            bits.append(f"Character (must match exactly): {char_desc}.")
+        if scene_desc:
+            bits.append(f"Setting: {scene_desc}.")
+        if style:
+            bits.append(f"Art style: {style}.")
+        bits.append("Single frame, 16:9 composition, film-like color grading; "
+                    "no text, no watermark, no grid, no multiple panels, no character sheet.")
+        still = " ".join(bits)
+
+        fp = fingerprint({"prompt": f"keyframe|{still}", "model": IMAGE_MODEL})
+        if self.project:
+            hit = self.project.shot(fp)
+            if hit:
+                cached = str((hit.get("result") or {}).get("asset") or "")
+                if cached and os.path.isfile(cached):
+                    return _data_url(cached), cached
+
+        resp = self._post("images/generations",
+                          {"model": IMAGE_MODEL, "prompt": still, "size": "1344x768"})
+        url = ((resp.get("data") or [{}])[0] or {}).get("url")
+        if not url:
+            raise ProviderError(f"首帧出图未返回地址: {json.dumps(resp, ensure_ascii=False)[:160]}", retryable=True)
+        path = os.path.join(self.outdir, f"keyframe_{task.task_id}.png")
+        self._download(url, path)
+        if self.project:
+            self.project.register_shot(fp, path, episode=self.episode,
+                                       result={"asset": path, "kind": "keyframe", "prompt": still})
+        return _data_url(path), path
 
     def _submit(self, task, prompt: str, image: str | None) -> dict:
         size = SIZE_MAP.get(str(task.input.get("resolution") or ""), "1920x1080")
@@ -370,6 +423,16 @@ class ZhipuVideoProvider(VideoProvider):
                 return saved
 
         prompt = self._build_prompt(task, ref_kind=ref_kind)
+        # 首帧 = 一致性的硬抓手：档案里没有可用的真参考图时，**现生成一张「角色定妆首帧」**
+        # （角色 + 场景 + 这一镜的画面）再拿它图生视频；出图失败才退回纯文生视频。
+        if image is None:
+            try:
+                kf_url, kf_path = self._shot_keyframe(task, prompt)
+            except ProviderError as e:
+                print(f"⚠ 首帧生成失败（{e}）→ 退回纯文生视频")
+                kf_url, kf_path = None, None
+            if kf_url:
+                image, ref_path, ref_kind = kf_url, kf_path, "keyframe"
         submitted = self._submit(task, prompt, image)
         task_id = submitted.get("id") or submitted.get("request_id")
         if not task_id:
@@ -414,8 +477,7 @@ class ZhipuVideoProvider(VideoProvider):
                                                            "motion_scale")})
         return out
 
-    @staticmethod
-    def _build_prompt(task, ref_kind: str | None = None) -> str:
+    def _build_prompt(self, task, ref_kind: str | None = None) -> str:
         """把分镜 + 风格约束拼成给生成模型看的提示词（英文更稳，CogVideoX 系对英文最敏感）。"""
         inp, cons = task.input, task.constraints
         parts = [str(inp.get("prompt") or inp.get("goal") or "").strip()]
@@ -448,6 +510,25 @@ class ZhipuVideoProvider(VideoProvider):
         if inp.get("_guard_continuity"):
             parts.append("continue seamlessly from the previous shot: same character, "
                          "same scene, same costume, same lighting")
+        # 角色/场景的**美术描述**也要进提示词：首帧图 + 文字双重锚定，是跨镜头一致性的两个抓手。
+        # （档案里存的是出资产图时那份改写过的具体描述。）
+        char_desc = self._project_desc("character", cons.get("character"))
+        if char_desc:
+            parts.append(f"the character must look exactly like this: {char_desc}")
+        scene_desc = self._project_desc("scene", cons.get("scene"))
+        if scene_desc:
+            parts.append(f"the setting must be exactly this: {scene_desc}")
+        # 运动基线：智谱视频 API 没有运动参数落点（_PROJECTION 把 motion_scale 投影过去也没有字段接），
+        # 唯一能控运动的杠杆就是提示词本身 —— 实测 frozen_frame 反反复复修不掉就是在这里断的。
+        parts.append("the subject is clearly moving through the whole shot: the action progresses, "
+                     "this is not a still image; add gentle camera movement (slow push-in)")
+        try:
+            motion = float(cons.get("motion_scale") or inp.get("motion_scale") or 0)
+        except (TypeError, ValueError):
+            motion = 0.0
+        if inp.get("_guard_motion") or motion > 1.0:
+            parts.append("strong, fast, dynamic movement — the subject travels across the frame, "
+                         "large pose changes, energetic action")
         return "，".join(p for p in parts if p)
 
     def set_episode(self, n) -> None:
