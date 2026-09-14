@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import os
 import random
+import sys
 import time
 
 from ..media import probe
@@ -47,6 +48,48 @@ DRIFT_BRIGHT = 0.12      # (1-strength) × 该值 = 亮度偏移（保证任何�
 DRIFT_CONTRAST = 0.25    # (1-strength) × 该值 = 对比度衰减
 MOTION_ZOOM = 1.15       # 有运镜时的固定推镜倍数（给平移留出余量）
 BLACK_HEAD_SECONDS = 0.3  # 片头全黑段（未被 trim_black 修掉时真的会出现黑帧）
+
+
+def font_file() -> str | None:
+    """挑一个 drawtext 能用的系统字体，找不到返回 None。
+
+    为什么必须有这一步（实测踩过）：不指定 fontfile 时 ffmpeg 走 fontconfig 找默认字体，
+    而 Windows（尤其 winget/Gyan 版）与精简 Linux 镜像里没有 fontconfig 配置 →
+    drawtext 直接报 "Fontconfig error: Cannot load default config file"，
+    整条渲染链全挂。显式给字体文件就绕开 fontconfig。
+    """
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        fonts = os.path.join(windir, "Fonts")
+        candidates = [os.path.join(fonts, n) for n in
+                      ("msyh.ttc", "msyhbd.ttc", "arial.ttf", "segoeui.ttf", "simhei.ttf")]
+    elif sys.platform == "darwin":
+        candidates = ["/System/Library/Fonts/Helvetica.ttc",
+                      "/System/Library/Fonts/Supplemental/Arial.ttf",
+                      "/Library/Fonts/Arial Unicode.ttf"]
+    else:
+        candidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                      "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+                      "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                      "/usr/share/fonts/liberation/LiberationSans-Regular.ttf"]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def drawtext(text: str, tail: str, fontsize: int = 44) -> str:
+    """拼一段 drawtext 滤镜：能指字体就指，避免整条渲染依赖系统 fontconfig。
+
+    Windows 盘符的冒号在滤镜表达式里会被当成参数分隔符，必须转义成 `\\:`。
+    """
+    font = font_file()
+    base = f"fontsize={fontsize}:fontcolor=white@0.9:{tail}"
+    if font:
+        escaped = font.replace("\\", "/").replace(":", r"\:")
+        return f"drawtext=fontfile='{escaped}':text='{text}':{base}"
+    return f"drawtext=text='{text}':{base}"
 
 # 中文色板：参考图（角色/场景）用确定性颜色，同一 key 永远同一张——可复现
 _PALETTE = [
@@ -132,8 +175,8 @@ class LocalRenderProvider(VideoProvider):
             "-filter_complex",
             f"[0:v]hue=h={hue}:s={sat}[a];[1:v]format=rgb24[b];"
             f"[a][b]blend=all_mode=softlight:all_opacity=0.85,"
-            f"drawtext=text='{key}':fontsize=44:fontcolor=white@0.9:"
-            f"x=(w-text_w)/2:y=h-text_h-16,format=rgb24[out]",
+            f"{drawtext(key, 'x=(w-text_w)/2:y=h-text_h-16')},"
+            f"format=rgb24[out]",
             "-map", "[out]", "-frames:v", "1", path,
         ])
         self._assets[key] = path

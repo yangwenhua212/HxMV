@@ -615,6 +615,8 @@ function renderEvent(ev, container) {
     div.innerHTML = t + `<div class="title"><span class="act ${ev.kind === "retry" ? "retry" : ""}">${actName}</span>${ev.kind === "retry" ? "重新生成" : ev.prompt ? esc(ev.prompt.slice(0, 40)) : ""}</div>`;
   } else if (ev.type === "infra.retry") {
     div.innerHTML = t + `<div class="title" style="color:var(--amber)">服务繁忙，重试 ${ev.attempt}/4</div>`;
+  } else if (ev.type === "infra.abort") {
+    div.innerHTML = t + `<div class="title" style="color:var(--red)">已停止：环境问题</div><div class="sub" style="color:var(--dim)">${esc(ev.hint || "")}</div><div class="sub" style="color:var(--dim)">${esc(ev.error || "")}</div>`;
   } else if (ev.type === "critic") {
     const layers = (ev.layers || []).map(l =>
       `<span class="layer">${l.layer.split("_")[0]}</span><span class="bar"><i style="width:${Math.round(l.score * 100)}%;background:${layerColor(l.score)}"></i></span>`).join("");
@@ -764,6 +766,7 @@ async function replay(runId) {
       if (ev.type === "run.start") { opened = ev.goal; html = t + `<div class="title">开始</div><div class="sub">${esc(ev.goal)}</div>`; }
       else if (ev.type === "task.start") html = t + `<div class="title"><span class="act ${ev.kind === "retry" ? "retry" : ""}">${actName}</span></div>`;
       else if (ev.type === "infra.retry") html = t + `<div class="title" style="color:var(--amber)">服务繁忙，重试 ${ev.attempt}/4</div>`;
+      else if (ev.type === "infra.abort") html = t + `<div class="title" style="color:var(--red)">已停止：环境问题</div><div class="sub" style="color:var(--dim)">${esc(ev.hint || "")}</div>`;
       else if (ev.type === "critic") html = t + `<div class="title">评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div><div>${(ev.failures || []).map(f => `<span class="pill red">${zh(FAILURES, f)}</span>`).join("")}</div>`;
       else if (ev.type === "decision") html = t + `<div class="title">${ev.decision === "PASS" ? "✅ 通过" : ev.decision === "RETRY" ? "🔧 重试" : "❌ 失败"}</div>`;
       else if (ev.type === "run.done") { done = ev; html = t + `<div class="title">完成</div><div class="sub" style="color:var(--dim)">${ev.completed.length} 项完成 · ${ev.attempts} 次尝试</div>`; }

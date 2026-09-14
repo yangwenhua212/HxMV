@@ -33,6 +33,13 @@ from .planner import make_planner
 from .state import ExecutionState, TaskStatus
 
 
+# 同一个基础设施错误连续放倒几个任务 = 环境问题已坐实，停止本次 run
+# （实测：ffmpeg 缺 fontconfig 时，5 个任务各重试 4 次 = 20 次必然失败的重试，
+#  没有任何一次尝试有可能成功，纯烧预算 + 拖长失败反馈）。
+INFRA_MAX_RETRY = 4        # 单个任务的基础设施重试上限
+INFRA_ABORT_STREAK = 3     # 连续栽在同一错误上的任务数上限
+
+
 def banner(state: ExecutionState) -> None:
     print("\n" + "═" * 52)
     print(f"  HxMV 自主控制闭环  v0.6 · 真 AI 视频 + 项目档案")
@@ -174,6 +181,8 @@ def run(goal: str,
     if provider is not None and hasattr(provider, "set_episode"):
         provider.set_episode(episode)
 
+    infra_sig = ""      # 最近一次基础设施错误的签名
+    infra_streak = 0    # 该签名连续放倒了几个任务
     while True:
         if state.budget.exhausted:
             state.log("⛔ 预算耗尽，停止")
@@ -199,18 +208,23 @@ def run(goal: str,
                   + (f"  [第 {task.retry_policy.get('attempts', 0)+1} 次尝试]" if task.retry_policy.get("attempts") else ""))
         result = None
         infra_retried = 0
-        while infra_retried < 4:
+        last_err = ""
+        # 熔断：前面的任务已经确认过这个错误无解（环境问题而不是网络抖动）→
+        # 新任务只试 1 次，不再重复踩 4 次（实测缺字体时连烧 20 次无效重试）
+        max_infra = 1 if infra_streak else INFRA_MAX_RETRY
+        while infra_retried < max_infra:
             try:
                 result = executor.execute(task)
                 break
             except ProviderError as e:
                 state.budget.used += e.cost_units  # 部分 API 失败也计费
                 infra_retried += 1
+                last_err = str(e)
                 state.log(f"⚠ 服务端错误: {e}（第 {infra_retried} 次重试）")
                 _emit({"type": "infra.retry", "task_id": task.task_id,
                        "action": task.action, "attempt": infra_retried,
                        "error": str(e), "retryable": bool(e.retryable)})
-                if not e.retryable or infra_retried >= 4:
+                if not e.retryable or infra_retried >= max_infra:
                     break
         if result is None:
             task.status = TaskStatus.FAIL
@@ -221,6 +235,19 @@ def run(goal: str,
             state.log(f"❌ {task.action} {task.task_id} 服务不可用，放弃")
             _emit({"type": "decision", "task_id": task.task_id, "action": task.action,
                    "decision": "FAIL", "reason": "infra", "note": "服务不可用（重试耗尽）"})
+
+            # 熔断：同一个错误放倒连续多个任务 → 判定为环境问题，提前收手。
+            # 这跟质量层的"相同失败+相同实测值收手"是同一套思路，只是发生在基础设施层。
+            sig = last_err[:120]
+            infra_streak = infra_streak + 1 if sig == infra_sig else 1
+            infra_sig = sig
+            if infra_streak >= INFRA_ABORT_STREAK:
+                hint = ("环境问题，继续跑只会重复失败：先跑 `python -m hxmv --doctor` 定位，"
+                        "或临时用 `--provider mock` 绕开渲染/远端")
+                state.log(f"⛔ 连续 {infra_streak} 个任务栽在同一个基础设施错误上 → {hint}")
+                _emit({"type": "infra.abort", "task_id": task.task_id,
+                       "error": sig, "streak": infra_streak, "hint": hint})
+                break
             continue
         if verbose and result.get("reused"):
             print("  ♻ 复用已有画面（未重新生成，0 成本）")

@@ -13,6 +13,15 @@ import argparse
 import os
 import sys
 
+# Windows 控制台默认是 GBK/936，print 一个 emoji 就 UnicodeEncodeError
+# 崩溃（实测：入口第一句 print 就崩，用户看到的不是功能问题而是编码报错）。
+# 这里统一切成 UTF-8 并容错替换，让真正的错误浮出水面，而不是被编码错误掩盖。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError, OSError):
+        pass
+
 from .core.brain import Brain
 from .core.loop import run
 
@@ -24,8 +33,10 @@ def main() -> int:
     ap.add_argument("--brain", default=None, help="大脑文件路径（默认 ~/.hxmv/brain.json）")
     ap.add_argument("--provider", default=None,
                     choices=["mock", "local", "fake", "zhipu", "kling"],
-                    help="生成器：mock=模拟世界（默认） local=FFmpeg 真渲染 "
-                         "zhipu=智谱 CogVideoX-Flash（真 AI 视频，免费） fake=线上仿真 kling=可灵 API")
+                    help="生成器：mock=模拟世界（不出真文件，验证闭环内核） "
+                         "local=FFmpeg 真渲染 zhipu=智谱 CogVideoX-Flash（真 AI 视频，免费） "
+                         "fake=线上仿真 kling=可灵 API。"
+                         "不指定时自动挑：有 Key 走真 AI，否则走 local；想跑模拟世界请显式写 --provider mock")
     ap.add_argument("--set-key", nargs=2, default=None, metavar=("PROVIDER", "KEY"),
                     help="写入 API Key 到 ~/.hxmv/config.json（例：--set-key zhipu <你的key>）")
     ap.add_argument("--key-status", action="store_true", help="查看各 provider 的 Key 是否已配置")
@@ -136,7 +147,10 @@ def main() -> int:
             os.remove(path)
         print("🧹 已清空大脑，从零开始")
     if args.provider:
-        os.environ["HXMV_PROVIDER"] = "" if args.provider == "mock" else args.provider
+        # 注意：mock 必须原样传过去。早期版本把 mock 映射成空串"表示默认"，
+        # 结果 executor 的自动选择把空串当成"用户没选"→ 一律落到 local，
+        # --provider mock 永远进不去模拟世界（README 第一条示例命令失效）。
+        os.environ["HXMV_PROVIDER"] = args.provider
     if args.out:
         os.environ["HXMV_ARTIFACTS"] = os.path.abspath(args.out)
     brain = Brain(args.brain) if args.brain else Brain()

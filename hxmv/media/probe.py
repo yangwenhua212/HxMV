@@ -69,6 +69,39 @@ def _run(args: list[str], timeout: int = 120) -> tuple[int, str]:
 _ENCODER: tuple[str, str] | None = None
 
 
+def drawtext_status(fontfile: str | None = None) -> tuple[bool, str]:
+    """drawtext（往画面上写字）能不能真的跑通——local provider 渲染参考图全靠它。
+
+    为什么单独查这一项（实测踩过）：ffmpeg 二进制在、libx264 也在，
+    唯独系统缺 fontconfig 配置（Windows/精简镜像常见）→ drawtext 报
+    "Fontconfig error: Cannot load default config file"，整条渲染链全挂；
+    而只检查"ffmpeg 存在"的自检会给出绿灯，用户看到的就是"能跑"却一直失败。
+
+    fontfile 显式给字体路径时可以绕开 fontconfig——传它进来等于测"修复后能不能用"。
+    """
+    ff = ffmpeg_path("ffmpeg")
+    if not ff:
+        return False, "无 ffmpeg"
+    vf = "drawtext=text='x':fontsize=16:fontcolor=white:x=0:y=0"
+    if fontfile:
+        escaped = fontfile.replace("\\", "/").replace(":", r"\:")
+        vf = f"drawtext=fontfile='{escaped}':text='x':fontsize=16:fontcolor=white:x=0:y=0"
+    tmp = os.path.join(tempfile.gettempdir(), f"_hxmv_drawtext_{os.getpid()}.png")
+    code, out = _run([ff, "-v", "error", "-y", "-f", "lavfi", "-i",
+                      "color=c=black:s=64x64:d=1", "-vf", vf, "-frames:v", "1", tmp],
+                     timeout=60)
+    if code == 0 and os.path.isfile(tmp):
+        return True, "可用"
+    hint = (out or "").strip().splitlines()
+    detail = hint[-1][:160] if hint else "未知原因"
+    try:
+        if os.path.isfile(tmp):
+            os.remove(tmp)
+    except OSError:
+        pass
+    return False, detail
+
+
 def encoder_args(quality: int = 26) -> list[str]:
     """可用的视频编码参数：优先 libx264（质量/体积最好），**没有就退 mpeg4**。
 

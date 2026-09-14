@@ -42,6 +42,32 @@ def run_checks(probe_network: bool = True) -> list[dict]:
             "name": "视频编码器", "ok": True, "detail": enc,
             "fix": "" if enc == "libx264" else "只有 mpeg4：能跑，但闭环会多花几次修正（画质更糊）",
         })
+        # drawtext：local provider 渲染参考图要在画面上写字，默认靠系统 fontconfig 找字体。
+        # Windows 与精简镜像常常没有 fontconfig 配置 → 二进制在、编码器在，但渲染全挂。
+        # 不查这一项，自检就会给出"可以跑"的绿灯，而用户一跑全是"服务端错误"。
+        try:
+            from ..providers.local_render import font_file
+            font = font_file()
+        except Exception:
+            font = None
+        ok_plain, why = probe.drawtext_status()
+        if ok_plain:
+            checks.append({"name": "drawtext（渲染写字）", "ok": True, "detail": "可用", "fix": ""})
+        elif font and probe.drawtext_status(font)[0]:
+            checks.append({
+                "name": "drawtext（渲染写字）", "ok": True,
+                "detail": f"默认 fontconfig 不可用，已自动改用 {os.path.basename(font)}",
+                "fix": "",
+            })
+        else:
+            fix = ("安装字体后再自检：Ubuntu/Debian: apt install fonts-dejavu-core ｜ "
+                   "Windows: 确认 C:\\Windows\\Fonts 下有 ttf/ttc ｜ "
+                   "暂时绕开：python3 -m hxmv --provider mock ...")
+            checks.append({
+                "name": "drawtext（渲染写字）", "ok": False,
+                "detail": f"local 渲染会全链路失败：{why}",
+                "fix": fix,
+            })
 
     writable = True
     try:
