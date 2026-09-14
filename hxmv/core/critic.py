@@ -122,11 +122,16 @@ class L1PhysicsCritic(Critic):
         # 成片的时长预期 = **各镜头时长之和**。不给的话会拿默认值去比 →
         # 两个 5 秒镜头拼出来的 10 秒成片被判 too_long，反复 RETRY 到最后 FAIL（实测踩过）。
         expect = task.input.get("duration")
-        if task.action == ACTION_COMPOSE and not expect:
+        if task.action == ACTION_COMPOSE:
+            # 成片的时长预期**只能来自镜头时长之和**：任务上带的 duration（规划器会顺手填 5 秒）
+            # 不是成片的预期时长——两个 5 秒镜头拼出来的 10.2 秒成片会因此反复判 too_long，
+            # 而 trim_duration 对"拼接"没有落点（改的只是任务上的 5→4），重试到终态 FAIL、
+            # 一部成片都出不来（实测：真跑 COMPOSE 必挂）。所以这里不看任务上的 duration。
             total = 0.0
             for p in (result.get("files") or []):
                 total += float((probe.probe_container(p) or {}).get("duration") or 0)
-            expect = round(total, 2) if total > 0 else None
+            if total > 0:
+                expect = round(total, 2)
         # 默认无声：只有这条任务明确要音频（with_audio）时，缺音轨/音量低才算缺陷。
         # 同理"一个连续镜头"只对单镜头任务成立——成片本来就该由多个镜头拼成，
         # 拿 multi_shot 判成片等于把每一部成片都判死（且修无可修）。

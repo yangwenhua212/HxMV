@@ -184,12 +184,26 @@ class ProviderRoutingTest(unittest.TestCase):
     def setUp(self):
         self._saved = os.environ.get("HXMV_PROVIDER")
         os.environ.pop("HXMV_PROVIDER", None)
+        # 隔离开发机的真配置：config.py 按 ~/.hxmv/config.json 读 Key，
+        # 不隔离的话「没配 Key 时回落 local」这条断言在配过 Key 的机器上**必挂**
+        # （实测：本机配了智谱 Key → _auto_provider() 返回 zhipu → 测试红了）。
+        self._tmp_home = tempfile.mkdtemp(prefix="hxmv-test-home-")
+        self._saved_home = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE", "HXMV_CONFIG")}
+        os.environ["HOME"] = self._tmp_home
+        os.environ["USERPROFILE"] = self._tmp_home
+        os.environ.pop("HXMV_CONFIG", None)
 
     def tearDown(self):
         if self._saved is None:
             os.environ.pop("HXMV_PROVIDER", None)
         else:
             os.environ["HXMV_PROVIDER"] = self._saved
+        for k, v in self._saved_home.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self._tmp_home, ignore_errors=True)
 
     def test_explicit_mock_is_never_downgraded(self):
         os.environ["HXMV_PROVIDER"] = "mock"
