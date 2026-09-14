@@ -206,7 +206,13 @@
     #brainBadge { font-size: 11px; }
     nav.tabs button { padding: 4px 11px; font-size: 13px; }
     .card { border-radius: 18px; padding: 14px; }
+    /* 国产浏览器会把正文字号放大（小米浏览器实测），控件必须能缩能换行，不许顶出卡片 */
+    select, .row input, textarea, button { max-width: 100%; min-width: 0; }
+    .row > select, .row > input { flex: 1 1 100%; }
+    #submitCard textarea { height: 76px; }
   }
+  /* 空对话不留空框 */
+  #chatLog:empty { display: none; }
 </style>
 </head>
 <body>
@@ -389,10 +395,17 @@ async function refreshConn() {
     el.textContent = "连不上";
   }
 }
-$("tokenInput").value = TOKEN;
+// 令牌不回显到输入框（截图/旁观就漏了）；要换令牌直接在这粘贴新的再点连接
+$("tokenInput").placeholder = TOKEN ? "令牌已保存（换新令牌就在这粘贴）" : "令牌（该实例的 HXMV_WEB_TOKEN）";
 $("connectBtn").onclick = () => {
-  TOKEN = $("tokenInput").value.trim();
-  localStorage.setItem("hxmvToken", TOKEN);
+  // 框里有新值就用新值；没有（已连接后我们不再回显令牌）就沿用已保存的
+  const typed = $("tokenInput").value.trim();
+  if (typed) {
+    TOKEN = typed;
+    localStorage.setItem("hxmvToken", TOKEN);
+  }
+  $("tokenInput").value = "";                 // 别把令牌长期明文摆在屏幕上（截图就漏了）
+  $("tokenInput").placeholder = TOKEN ? "令牌已保存（换新令牌就在这粘贴）" : "令牌（该实例的 HXMV_WEB_TOKEN）";
   refreshConn();
   refreshBrain();
   refreshRuns();
