@@ -184,15 +184,35 @@ class ProviderExecutor(Executor):
         return self.provider.generate(api_task)
 
 
-def make_executor(project=None, episode: int | None = None):
-    """工厂：HXMV_PROVIDER=local/fake/kling → ProviderExecutor；否则/失败落 Mock。
+def _auto_provider() -> str:
+    """没显式指定 provider 时，自动挑**能出真视频**的那个。
 
-    project = 项目档案（跨 run 记忆风格/角色/已生成画面）：local provider 会先查档，
+    为什么必须有这一步（实测踩过）：直接调 API 或 MCP 工具（不传 provider）时，
+    HXMV_PROVIDER 为空 → 一律落 MockVideoExecutor → 出来的是假视频。
+    老大看到的就是「做出来的东西不对」。真视频必须优先，Mock 只能是最后的兜底。
+    """
+    try:
+        from . import config as _cfg
+        if _cfg.configured("zhipu"):
+            return "zhipu"
+        if _cfg.configured("kling"):
+            return "kling"
+    except Exception:
+        pass
+    return "local"          # 本地 FFmpeg 真渲染：不花钱、不联网，但至少是真文件
+
+
+def make_executor(project=None, episode: int | None = None):
+    """工厂：HXMV_PROVIDER=local/fake/kling/zhipu → ProviderExecutor；否则/失败落 Mock。
+
+    project = 项目档案（跨 run 记忆风格/角色/已生成画面）：provider 会先查档，
     命中就复用已有画面，不重新生成。
     """
-    name = os.environ.get("HXMV_PROVIDER", "").lower()
+    name = os.environ.get("HXMV_PROVIDER", "").strip().lower() or _auto_provider()
     if name:
         try:
+            if name == "mock":
+                return MockVideoExecutor(project=project)
             if name == "local":
                 from ..providers.local_render import LocalRenderProvider
                 return ProviderExecutor(LocalRenderProvider(project=project))
