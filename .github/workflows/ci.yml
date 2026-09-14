@@ -40,6 +40,11 @@ jobs:
         # 挡住"某个平台专属语法/缩进错误只在特定分支才暴露"这类低级回归
         run: python -m compileall -q hxmv tools tests mcp_server.py
 
+      - name: 开源前自检（不得含私密信息）
+        # 这是"门"而不是"提醒"：命中密钥/本机路径/私人邮箱就红，
+        # 免得它们混进公开仓库的历史（历史里清了还要重写，代价大得多）
+        run: python tools/check_secrets.py
+
       - name: 单元测试
         # 守住三条不变量：指纹白名单全覆盖、Critic 建议可被 Refiner 执行、provider 路由不退化
         run: python -m unittest discover -s tests -v
