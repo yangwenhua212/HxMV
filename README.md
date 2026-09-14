@@ -53,7 +53,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/brain.py` | **大脑**：持久记忆，自动注入/自动回写，会遗忘（详见下） |
 | `core/project.py` | **项目档案（v0.5）**：跨 run 记住风格/角色/场景/已生成画面与分集——续做不重画 |
 | `providers/local_render.py` | **真渲染 provider（v0.4）**：用系统 FFmpeg 真出片（资产/镜头/成片都落盘），参数真的决定可测质量 |
-| `providers/zhipu_video.py` | **真 AI 视频（v0.6）**：智谱 CogVideoX-Flash（免费）文/图生视频，角色参考图当首帧锁角色 |
+| `providers/zhipu_video.py` | **真 AI 视频（v0.6）**：智谱 CogVideoX-Flash（免费）文/图生视频。**一张首帧只能锁一类**：默认锁角色（`cons.ref_use="scene"` 可改成锁场景），另一类靠提示词里写明（场景锁/角色锁）——不写清楚，模型会把参考图的背景一起搬过来（实测：给草地上的柯基照片 → 出来还是草地，要的雪地没出现） |
 | `core/config.py` | 本地凭据：`~/.hxmv/config.json`（权限 600），`--set-key` 一次配好，CLI 与 Web 共用 |
 | `providers/` | Provider 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
 | `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板（生产页 / **设置页**：接口配置与模型档位） |
@@ -182,8 +182,37 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - 侧栏实时显示大脑沉淀（LESSON 升华），底部历史 run 点击即回放
 - 事件存档：`~/.hxmv/runs/<id>/events.jsonl`（可审计、可回放）
 - 公网：设 `HXMV_WEB_TOKEN` 后所有 `/api/*` 需 token（header 或 `?token=`），面板 URL 带一次即记住
-- **参考图卡片**：填项目名 → 选图片 → **预览**（自动把设定表裁成 16:9 主视觉）→ 存为参考图。镜头就会从这张图开始动，不用碰命令行
+- **参考图卡片**：填项目名 → 选**角色/场景** → 选图片 → **预览**（自动把设定表裁成 16:9 主视觉）→ 存为参考图。镜头就会从这张图开始动，不用碰命令行
+- **首帧只锁一类**：角色图当首帧（默认）→ 提示词额外写明「这张图只定角色长相，背景别抄它」；场景图当首帧（`ref_use="scene"`）→ 反过来锁角色。**首帧那张图实际是哪一类会进画面指纹**，所以切换不会复用错文件
+
 - **设置页**（顶部分页）直接配接口：粘贴智谱 / 可灵 Key、切视频模型档位（免费 / 付费）、切视觉评审档位，保存即生效——不用再命令行 `--set-key`，手机上也能配
+
+## 接进你自己的 Agent（MCP）
+
+HxMV 可以作为**工具**挂到任意支持 MCP 的 Agent 上（Claude Desktop / Cursor / Hermes 等都行），
+让「出一段视频」变成 Agent 的一个原生动作，而不是你自己去点面板。
+
+```bash
+# 1) 面板在跑（本机 127.0.0.1:8668），令牌在 ~/.hxmv/panel.env 里
+# 2) 挂上去：用一个装了 mcp SDK 的 python
+HXMV_PYTHON=$(which python3) ./start_mcp.sh        # 先手搓测一下能否握手
+
+# 以 Hermes 为例（其他客户端同理，填 command 即可）：
+hermes mcp add hxmv --command /你的路径/hxmv/start_mcp.sh
+```
+
+提供的工具（全部走 HTTP 转发到本机面板，MCP 进程本身不持状态）：
+
+| 工具 | 用途 | 花钱 |
+| :--- | :--- | :--- |
+| `hxmv_chat` | 说需求 / 改需求 → 回话 + 可执行 goal | 不花（不落盘不开工） |
+| `hxmv_make` | 真开工出片 → `run_id` | 按所选模型：免费档 0 元 / 付费档按次 |
+| `hxmv_watch` | 看进度（给 `run_id` 看这次；不给看最近的作品） | 不花 |
+| `hxmv_files` | 列产物，**返回本地绝对路径**（可直接当附件发出去） | 不花 |
+| `hxmv_discard` | 删掉不满意的片（删产物 + 撤销项目档案登记） | 不花 |
+
+环境变量：`HXMV_BASE`（面板地址，默认 `http://127.0.0.1:8668`）、`HXMV_WEB_TOKEN`（默认从
+`~/.hxmv/panel.env` 读）、`HXMV_PANEL_ENV`（令牌文件路径）、`HXMV_PYTHON`（wrapper 用的解释器）。
 
 ## 路线
 
@@ -195,6 +224,7 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - **V0.5** ✅ 项目档案：风格/角色/已生成画面跨 run 记忆 + 剧情身份复用（续做不重画），Web 端可指定项目
 - **V0.6** ✅ 真 AI 视频接入：智谱 CogVideoX-Flash（免费）文/图生视频 + 角色参考图当首帧 + Key 本地配置（`--set-key`）+ 仿真端点自测
 - **V0.7** ✅ 真视觉闭环 + 两个入口 + 跑分：L2/L3 抽帧喂视觉模型（真看图）、面板/CLI **上传参考图**、**基准集跑分曲线**（`tools/bench.py` → `docs/BENCH.md`）
+- **V0.7** ✅ 语义修正真落地（四条守卫真改提示词）+ 场景锁/角色锁（首帧只锁一类）
 - **V0.7** 🚧 **真视觉闭环 ✅**（L2 抽帧身份判定 + L3 抽帧语义评审，配 `HXMV_VLM_MODEL` 生效；未配则如实标注未做视觉检查）；资产一致性深化（参考图版本管理、跨镜头锁脸）、checkpoint 人工审批点 📋
 - **V0.8** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
