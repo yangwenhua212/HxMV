@@ -214,6 +214,14 @@ hermes mcp add hxmv --command /你的路径/hxmv/start_mcp.sh
 环境变量：`HXMV_BASE`（面板地址，默认 `http://127.0.0.1:8668`）、`HXMV_WEB_TOKEN`（默认从
 `~/.hxmv/panel.env` 读）、`HXMV_PANEL_ENV`（令牌文件路径）、`HXMV_PYTHON`（wrapper 用的解释器）。
 
+## 安全模型（部署到公网前先看一遍）
+
+- **认证**：设 `HXMV_WEB_TOKEN` 后所有 `/api/*` 都要令牌（`X-Hxmv-Token` 头 / `?token=` / Cookie），只有 `/api/health` 公开；面板默认只监听 `127.0.0.1`，外网一律走反代 + HTTPS。
+- **路径穿越**：`run_id` / 产物名一律白名单校验（`YYYYMMDD-HHMMSS-xxxx`），`/api/artifact`、`/api/run/<id>/files`、`/api/ref/image` 都已挡住（实测 400/404，不会吐出 `panel.env` 这类文件）。
+- **令牌别进日志**：面板 URL 可能带 `?token=` 或 `/k/<令牌>`，默认日志格式会把整条 URI 原样写进 `access.log`／journal —— 令牌就明文躺着了。反代请用 `deploy/nginx-mask.conf`（`map` + 自定义 `log_format`）脱敏，历史上已经落下的要一并清掉。
+- **当成 Agent 工具用（MCP）**：`hxmv_make` 对付费档**默认拒绝**（必须显式 `allow_paid=true`），且有每日上限 `HXMV_MAX_PAID_PER_DAY`（默认 5）；每次开工/删片写 `~/.hxmv/mcp_audit.log` —— 防的是提示注入 / 循环调用烧钱。
+- **凭据**：`~/.hxmv/panel.env`（令牌）、`~/.hxmv/config.json`（模型 Key）权限 600，且都不进 git。
+
 ## 路线
 
 - **V0.1** ✅ 自主闭环内核（Mock 世界）
