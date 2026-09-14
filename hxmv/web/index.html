@@ -155,9 +155,9 @@
   .card h3 { font-size: 12px; letter-spacing: 1.4px; }
 
   /* 创作区当 hero：这块是主角，视觉上要压得住 */
-  #submitCard { border-color: rgba(76,195,138,.32);
+  /* （#submitCard 已并入对话工具条，样式删除） */
+  #chatCard { border-color: rgba(76,195,138,.32);
                 box-shadow: 0 18px 52px rgba(0,0,0,.34), inset 0 0 0 1px rgba(76,195,138,.07); }
-  #submitCard textarea { height: 86px; font-size: 16px; border-radius: 14px; }
   #runBtn { width: 100%; padding: 12px 26px; border-radius: 13px; font-size: 15px;
             background: linear-gradient(135deg, var(--accent), var(--accent-strong)); color: #04140f;
             box-shadow: 0 12px 28px rgba(76,195,138,.22); }
@@ -209,10 +209,24 @@
     /* 国产浏览器会把正文字号放大（小米浏览器实测），控件必须能缩能换行，不许顶出卡片 */
     select, .row input, textarea, button { max-width: 100%; min-width: 0; }
     .row > select, .row > input { flex: 1 1 100%; }
-    #submitCard textarea { height: 76px; }
   }
   /* 连接（含状态）只出现在「设置」里，生产页顶栏不摆任何配置/连接相关的东西 */
   #brainBadge { margin-left: auto; }
+  /* 聊天即创作：一个聊天窗 + 作品页；进度/报告/成片都长在对话流里 */
+  #chatCard { min-height: 62vh; display: flex; flex-direction: column; gap: 10px; }
+  #chatLog { max-height: 46vh; }
+  .chatbar { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border); }
+  #taskBox { border-left: 2px solid rgba(76,195,138,.45); padding: 2px 0 4px 12px; margin: 4px 0; }
+  #taskBox h3 { font-size: 12px; letter-spacing: 1.2px; margin: 0 0 8px; color: var(--dim); }
+  #chatHint { min-height: 16px; font-size: 13px; color: var(--dim); }
+  /* 起点（空会话）：给三句话直接点，别让人对着空框发呆 */
+  #chatEmpty { padding: 6px 2px 2px; }
+  .ce-title { font-size: 20px; font-weight: 700; }
+  .ce-sub { color: var(--dim); font-size: 14px; margin: 8px 0 14px; line-height: 1.6; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip2 { background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+           border-radius: 999px; padding: 8px 14px; font-size: 13px; }
+  .chip2:hover { border-color: rgba(76,195,138,.5); color: var(--accent-strong); }
   /* 空对话不留空框 */
   #chatLog:empty { display: none; }
 </style>
@@ -232,32 +246,52 @@
   <div class="page" id="pageProduce">
   <section>
     <div class="card" id="chatCard">
-      <h3>对话</h3>
+      <div id="chatEmpty">
+        <div class="ce-title">说一句，它就去拍</div>
+        <div class="ce-sub">一句话提需求 → 它回话 + 给出可执行目标 → 点「开工」就真的开始跑，进度和成片都长在这条对话下面。</div>
+        <div class="chips">
+          <button class="chip2" data-ask="一只柯基在雪地里打滚，8 秒">一只柯基在雪地里打滚，8 秒</button>
+          <button class="chip2" data-ask="小石猴在花果山翻跟头，5 秒，电影感">小石猴在花果山翻跟头，5 秒</button>
+          <button class="chip2" data-ask="雨夜霓虹街道，慢镜头，3 秒">雨夜霓虹街道，慢镜头，3 秒</button>
+        </div>
+      </div>
+
       <div id="chatLog"></div>
-      <div class="row">
-        <input id="chatInput" placeholder="说一句：想做什么片 / 想改哪里（如「刚才那条改成夜晚，5 秒」）">
-        <button id="chatSend">发送</button>
+
+      <!-- 任务气泡：说一句 → 回话 → 点开工 → 进度/报告/成片都长在这条对话流里 -->
+      <div id="taskBox" hidden>
+        <div id="liveCard">
+          <h3 id="liveTitle">实时过程</h3>
+          <div id="timeline"></div>
+        </div>
+        <div id="sumBox"><div id="sumBody"></div></div>
       </div>
+
       <div id="chatHint"></div>
-    </div>
 
-    <div class="card" id="submitCard">
-      <h3>开始生产</h3>
-      <textarea id="goalInput" placeholder="想做什么内容？例如：一只柯基在雪地里打滚，8 秒短片"></textarea>
-      <div class="row">
-        <select id="providerSel">
-          <option value="zhipu">智谱 AI 真视频（免费）</option>
-          <option value="local">本地真渲染</option>
-          <option value="mock">模拟世界</option>
-          <option value="fake">线上仿真</option>
-          <option value="kling">可灵 API</option>
-        </select>
-        <input id="projectInput" placeholder="项目名（留空=一次性；填了会记住风格/角色，续做不重画）">​
-        <button id="runBtn">开始生产</button>
-        <span id="runHint"></span>
+      <div class="chatbar">
+        <div class="row">
+          <select id="providerSel">
+            <option value="zhipu">智谱 AI 真视频（免费）</option>
+            <option value="local">本地真渲染</option>
+            <option value="mock">模拟世界</option>
+            <option value="fake">线上仿真</option>
+            <option value="kling">可灵 API</option>
+          </select>
+          <input id="projectInput" placeholder="项目名（可留空）">
+        </div>
+        <div class="row">
+          <input id="chatInput" placeholder="说一句：想做什么片 / 想改哪里（如「刚才那条改成夜晚，5 秒」）">
+          <button id="chatSend">发送</button>
+        </div>
+        <div id="runHint"></div>
+        <textarea id="goalInput" hidden></textarea>
+        <button id="runBtn" hidden>开始生产</button>
       </div>
     </div>
+  </section>
 
+  <aside>
     <div class="card" id="worksCard">
       <h3>作品</h3>
       <div id="runsList"></div>
@@ -290,18 +324,6 @@
       <div class="refGrid" id="refList"></div>
     </div>
 
-    <div class="card" id="sumBox">
-      <h3>执行报告</h3>
-      <div id="sumBody"></div>
-    </div>
-
-    <div class="card" id="liveCard">
-      <h3 id="liveTitle">实时过程</h3>
-      <div id="timeline"></div>
-    </div>
-  </section>
-
-  <aside>
     <div class="card">
       <h3>大脑记忆</h3>
       <div id="brainList"></div>
@@ -579,14 +601,25 @@ function startStream(runId) {
   currentRun = runId;
   const tl = $("timeline");
   tl.innerHTML = ""; $("sumBox").style.display = "none";
+  $("taskBox").hidden = false;
   $("liveTitle").textContent = "实时过程";
+  $("taskBox").scrollIntoView({ behavior: "smooth", block: "nearest" });
   es = new EventSource(sseUrl(`/api/stream?run_id=${runId}`));
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
     renderEvent(ev, tl);
-    if (ev.type === "run.done") showSummary(ev, runId);
+    if (ev.type === "run.done") { showSummary(ev, runId); collapseProc(tl); }
   };
   es.onerror = () => {};
+}
+
+/** 跑完把过程折起来：对话流要干净，细节点开再看（和历史回放一个样子）。 */
+function collapseProc(tl) {
+  if (tl.dataset.collapsed) return;
+  const n = tl.querySelectorAll(".ev").length;
+  if (!n) return;
+  tl.dataset.collapsed = "1";
+  tl.innerHTML = `<details class="proc"><summary>过程记录（${n} 步，点开看细节）</summary>${tl.innerHTML}</details>`;
 }
 
 function showSummary(ev, runId, aborted) {
@@ -636,17 +669,19 @@ async function replay(runId) {
   const tl = $("timeline"); tl.innerHTML = ""; $("sumBox").style.display = "none";
   if (es) { es.close(); es = null; }
   currentRun = null;
+  $("taskBox").hidden = false;              // 任务长在对话流里，回放同样展开
   $("liveTitle").textContent = "历史回放";
+  $("taskBox").scrollIntoView({ behavior: "smooth", block: "nearest" });
   try {
     const d = await (await hx(`/api/run/${runId}`)).json();
-    let done = null;
+    let done = null, opened = "";
     for (const ev of d.events) {
       const div = document.createElement("div");
       div.className = "ev " + (ev.type + " " + (ev.decision || "")).toLowerCase();
       const t = `<div class="meta">${fmt(ev.ts)}</div>`;
       const actName = ACTIONS[ev.action] || ev.action;
       let html = "";
-      if (ev.type === "run.start") html = t + `<div class="title">开始</div><div class="sub">${esc(ev.goal)}</div>`;
+      if (ev.type === "run.start") { opened = ev.goal; html = t + `<div class="title">开始</div><div class="sub">${esc(ev.goal)}</div>`; }
       else if (ev.type === "task.start") html = t + `<div class="title"><span class="act ${ev.kind === "retry" ? "retry" : ""}">${actName}</span></div>`;
       else if (ev.type === "infra.retry") html = t + `<div class="title" style="color:var(--amber)">服务繁忙，重试 ${ev.attempt}/4</div>`;
       else if (ev.type === "critic") html = t + `<div class="title">评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div><div>${(ev.failures || []).map(f => `<span class="pill red">${zh(FAILURES, f)}</span>`).join("")}</div>`;
@@ -660,6 +695,7 @@ async function replay(runId) {
     const n = tl.querySelectorAll(".ev").length;
     if (n) tl.innerHTML = `<details class="proc"><summary>过程记录（${n} 步，点开看细节）</summary>${tl.innerHTML}</details>`;
     // 没跑完的（服务重启会打断）也要把已有产物给出来——磁盘上有就让他看得到
+    if (opened) chatSay("me", "打开：" + opened);   // 从作品库点开也像一句话，别凭空冒出个任务
     showSummary(done || { completed: [], outputs: [] }, runId, !done);
     $("sumBox").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) { tl.innerHTML = '<div class="empty">回放失败</div>'; }
@@ -721,6 +757,7 @@ $("vlmModel").onchange = () => saveConfig("zhipu", "keyZhipu");
 let chatHistory = [];   // 只留在内存：刷新即清（对话不需要长期留档）
 function chatHint(t, bad) { const el = $("chatHint"); el.textContent = t || ""; el.style.color = bad ? "var(--red)" : "var(--dim)"; }
 function chatSay(role, text, goal) {
+  $("chatEmpty").hidden = true;              // 一开口就收起起点
   const box = $("chatLog"), el = document.createElement("div");
   el.className = "chatMsg " + role;
   el.appendChild(document.createTextNode(text));
@@ -728,7 +765,13 @@ function chatSay(role, text, goal) {
     const b = document.createElement("button");
     b.className = "goBtn";
     b.textContent = "开工：" + goal;
-    b.onclick = () => { $("goalInput").value = goal; chatHint("已填进下面的目标框，点「开始生产」就跑（也可先改两字）"); };
+    b.onclick = () => {
+      // 一次点击 = 直接开工（老大要求「一个聊天窗口就够了」，不再两步走）
+      $("goalInput").value = goal;
+      chatSay("me", "开工：" + goal);
+      chatHint("开工了，进度和成片就长在这条对话下面");
+      submitRun();
+    };
     el.appendChild(b);
   }
   box.appendChild(el);
@@ -748,6 +791,9 @@ async function chatSend() {
   } catch (e) { chatHint(e.message, true); }
 }
 $("chatSend").onclick = chatSend;
+document.querySelectorAll("#chatEmpty .chip2").forEach(b => {
+  b.onclick = () => { $("chatInput").value = b.dataset.ask; chatSend(); };
+});
 $("chatInput").addEventListener("keydown", e => { if (e.key === "Enter") chatSend(); });
 
 // 不满意就删：删产物 + 撤销它在项目档案里的登记（别再当作设定影响后面）
@@ -760,6 +806,7 @@ async function discardRun(runId) {
     const d = await postJson("/api/discard", { run_id: runId });
     if (hint) hint.textContent = "已删：" + d.removed_files + " 个文件，撤销 " + d.removed_records + " 条登记";
     $("sumBox").style.display = "none";
+    $("taskBox").hidden = true;
     refreshRuns();
   } catch (e) { if (hint) hint.textContent = e.message; }
 }
