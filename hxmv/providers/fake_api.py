@@ -18,6 +18,8 @@ from .base import ProviderError, VideoProvider
 
 class FakeApiProvider(VideoProvider):
     name = "fake"
+    parallel_safe = True      # 纯仿真、不落产物文件，天然可并发
+
     action_map = {"GENERATE_SHOT": "text2video", "GENERATE_SCENE": "image",
                   "GENERATE_CHARACTER": "image"}
 

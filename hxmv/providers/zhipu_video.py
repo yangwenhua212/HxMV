@@ -81,6 +81,9 @@ def _encoded_frame(image: str, w: int | None, hgt: int | None, outdir: str) -> s
 
 class ZhipuVideoProvider(VideoProvider):
     name = "zhipu"
+    # 每个任务的产物路径都带 task_id（keyframe_/shot_<task_id>），产物目录互不重叠；
+    # 与智谱的全部交互都是无状态 HTTP → 多镜头可以并行提交+轮询（墙钟时间大幅下降）。
+    parallel_safe = True
     action_map = {"GENERATE_SHOT": "videos/generations", "GENERATE_CHARACTER": "image",
                   "GENERATE_SCENE": "image", "COMPOSE": "concat"}
 

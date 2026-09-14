@@ -104,6 +104,27 @@
 
    新判据同样遵守"守卫必须真改提示词"的铁律：`_guard_sharp` / `_guard_single_shot` 都进了 `_FP_KEYS`。
 
+4.4 **并行只给"互相独立"的那一段，代价是事件顺序不可控**
+   多镜头并行（`HXMV_PARALLEL>1`）能压缩墙钟时间，但边界必须画清楚，否则是拿正确性换速度：
+
+   **能并行**：`GENERATE_SHOT`。镜头之间没有依赖，产物各按 `task_id` 命名互不覆盖。
+   **不能并行**：`GENERATE_CHARACTER`/`GENERATE_SCENE`（共享资产缓存与档案写入）、
+   `COMPOSE`（依赖全部镜头）、以及任何来自 `retry_queue` 的修正任务（修正必须立刻做）。
+   **永远串行**：critic 判定、controller 状态推进、档案与大脑写回、事件序列化——
+   这些都在主线程按批次顺序执行，所以 **run 的最终结果与串行执行逐字段等价**（有测试守着）。
+
+   三处必须加的锁（不加不是"偶尔丢条记录"，而是文件写坏）：
+   - `Project._lock`：并发登记镜头时 `self.shots` 的读改写；还要防 `best_for` 迭代
+     一个正在被改的 dict（会直接抛 RuntimeError）
+   - `Project.save` 的**原子替换**：两个线程同时 `open(path,"w")` 会把 project.json
+     写成交错的坏 JSON → 下次 load 判成空档案 → 整个项目的记忆一次性归零
+   - `local_render._FILE_LOCK`：参考图/基线帧/漂移图是**同名共享路径**，
+     必须锁住"检查是否存在"那一刻（check-then-act 的竞态就出在检查上）
+
+   并发还有两个"不做"的自觉：provider 必须**显式声明** `parallel_safe` 并支持重建实例
+   （否则退回串行）；可灵适配器仍是骨架且并发会撞配额，所以明确不给并行——
+   宁可不加速，也不给用户一个会 429 的"加速"。
+
 5. **上下文动态压缩**
    不固定"每 N 镜头压缩一次"，而是 observations 估算 token 超阈值才压缩
    （折叠最旧保留最新），由 ContextManager 统一管。

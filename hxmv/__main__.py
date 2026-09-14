@@ -76,6 +76,10 @@ def main() -> int:
     ap.add_argument("--doctor", action="store_true",
                     help="部署自检：Python/ffmpeg/编码器/Key/目录/端口，缺什么给什么修复命令")
     ap.add_argument("--out", default=None, help="产物目录（local provider 用，默认 ~/.hxmv/artifacts/<时间戳>）")
+    ap.add_argument("--parallel", type=int, default=None, metavar="N",
+                    help="并行度（默认 1 = 全串行）。>1 时同时生成多个**互相独立的镜头**，"
+                         "缩短墙钟时间（真 API 场景收益最大）；评审/判定/档案写回仍严格串行，"
+                         "结果与串行等价。只有声明了并行安全的 provider 才真的并行")
     ap.add_argument("--approve", default="none", choices=("none", "each", "paid"),
                     help="人工审批点（checkpoint）：none=不审批（默认）；"
                          "each=每个生成动作开工前等你确认；"
@@ -191,6 +195,8 @@ def main() -> int:
         os.environ["HXMV_PROVIDER"] = args.provider
     if args.out:
         os.environ["HXMV_ARTIFACTS"] = os.path.abspath(args.out)
+    if args.parallel is not None:
+        os.environ["HXMV_PARALLEL"] = str(max(1, args.parallel))
     brain = Brain(args.brain) if args.brain else Brain()
 
     project = None

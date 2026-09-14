@@ -57,7 +57,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/config.py` | 本地凭据：`~/.hxmv/config.json`（权限 600），`--set-key` 一次配好，CLI 与 Web 共用 |
 | `providers/` | Provider 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
 | `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板（生产页 / **设置页**：接口配置与模型档位）；面板里可直接**点批准/拒绝**人工审批点 |
-| `core/loop.py` | **闭环主体** + 两道护栏：**人工审批点**（`approve` 回调，付费/高危动作开工前先问，拒绝不产生任何费用）+ **基础设施熔断**（同一错误连倒 3 个任务即停，无效重试 20 次→6 次） |
+| `core/loop.py` | **闭环主体** + 三道护栏：**人工审批点**（`approve` 回调，付费/高危动作开工前先问，拒绝不产生任何费用）+ **基础设施熔断**（同一错误连倒 3 个任务即停，无效重试 20 次→6 次）+ **多镜头并行**（`HXMV_PARALLEL`：只并互相独立的镜头，评审/判定/档案写回严格串行，结果与串行等价） |
 | `tests/` | **单元测试（39 例，纯标准库）**：守住"指纹白名单全覆盖""Critic 建议必须可被 Refiner 执行""provider 路由不退化"等踩过的坑 |
 
 ### v0.4「真产物 + 真眼睛」：哪部分是真的
@@ -131,6 +131,9 @@ python3 -m hxmv --brain /path/brain.json "..."
 # 人工审批点：付费/高危动作**开工前**先问一次（拒绝 → 不执行、不产生费用）
 python3 -m hxmv --provider zhipu --approve paid "第1集：柯基在雪地里打滚"   # 只问计费动作
 python3 -m hxmv --provider local --approve each "冷启动全流程演示"          # 每个动作都问
+
+# 多镜头并行：同时生成互相独立的镜头（评审/判定/档案写回仍严格串行，结果与串行等价）
+python3 -m hxmv --provider zhipu --parallel 3 "柯基短剧第2集：柯基跑到海边看浪"
 
 # 跑测试（纯标准库，零安装；含真 ffmpeg 的集成用例，没装 ffmpeg 会自动跳过）
 python3 -m unittest discover -s tests -v
@@ -246,7 +249,7 @@ hermes mcp add hxmv --command /你的路径/hxmv/start_mcp.sh
 - **V0.7** ✅ 真视觉闭环 + 两个入口 + 跑分：L2/L3 抽帧喂视觉模型（真看图）、面板/CLI **上传参考图**、**基准集跑分曲线**（`tools/bench.py` → `docs/BENCH.md`）
 - **V0.7** ✅ 语义修正真落地（四条守卫真改提示词）+ 场景锁/角色锁（首帧只锁一类）
 - **V0.7** 🚧 **真视觉闭环 ✅**（L2 抽帧身份判定 + L3 抽帧语义评审，配 `HXMV_VLM_MODEL` 生效；未配则如实标注未做视觉检查）；资产一致性深化（参考图版本管理、跨镜头锁脸）、checkpoint 人工审批点 📋
-- **V0.8** ✅ 判据扩容 + 工程化：`blurdetect` 真模糊（与"分辨率不足"分开判、分开修）、`scdet` 镜头切换（单镜头任务不许模型自己剪片）、`loudnorm`/`silencedetect` 抓"有音轨但全程静音"；**人工审批点**（人在回路的付费闸门）；基础设施熔断；三层评审并行 + 单层异常隔离；Brain 原子写与跨进程锁；CI + 单元测试
+- **V0.8** ✅ 判据扩容 + 工程化 + 并行：`blurdetect` 真模糊（与"分辨率不足"分开判、分开修）、`scdet` 镜头切换（单镜头任务不许模型自己剪片）、`loudnorm`/`silencedetect` 抓"有音轨但全程静音"；**人工审批点**（人在回路的付费闸门）；基础设施熔断；**多镜头并行**（只并独立镜头，判定与写回仍串行）；三层评审并行 + 单层异常隔离；Brain/Project 原子写与锁；CI + 单元测试（43 例）
 - **V0.9** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
 ## 设计文档
