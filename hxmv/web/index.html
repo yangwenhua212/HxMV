@@ -291,6 +291,12 @@
                   border: 1px solid var(--border); background: var(--panel2); color: var(--text);
                   font-size: 17px; line-height: 1; cursor: pointer; }
   #refOpenBtn { margin-top: 12px; }
+  /* 创作页「＋」快速上传的素材条：选完图直接把"已就位"摆在输入框上方 */
+  .quick-art { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .quick-art[hidden] { display: none; }
+  .quick-art img { width: 66px; height: 42px; object-fit: cover; border-radius: 8px;
+                   border: 1px solid var(--border); background: var(--panel2); }
+  .quick-art .qa-tip { font-size: 12px; color: var(--dim); }
 </style>
 </head>
 <body>
@@ -320,10 +326,13 @@
       </div>
       <div class="hint-up" id="hintUp">上划发现更多功能</div>
 
+      <div class="quick-art" id="quickArt" hidden></div>
+
       <div class="composer">
         <input id="ideaInput" placeholder="输入灵感，一键成片">
+        <input id="quickRef" type="file" accept="image/*" multiple hidden>
         <div class="composer-row">
-          <button class="round" id="plusBtn" title="参考图">＋</button>
+          <button class="round" id="plusBtn" title="上传素材（角色参考图）">＋</button>
           <button class="mini" id="modelBtn">◉ 模型</button>
           <span id="ideaHint"></span>
           <button class="send" id="ideaSend">发送</button>
@@ -919,11 +928,51 @@ function closeRef() { $("refDrawer").hidden = true; }
 $("refOpenBtn").onclick = openRef;
 $("refClose").onclick = closeRef;
 $("refMask").onclick = closeRef;
-$("plusBtn").onclick = openRef;                                        // 就地打开，不跳页
+$("plusBtn").onclick = () => $("quickRef").click();   // 直接弹文件选择：选图即素材（不跳页）
 $("modelBtn").onclick = () => showPage("settings");                    // 档位在设置
 
 // ---------- 创作首页：功能胶囊 + 底部大输入框 ----------
 const ideaTip = (t) => setHint("ideaHint", t);
+
+// ---------- 创作页「＋」：选图 → 自动登记为角色素材（不必先填项目名）----------
+// 在用户视角里加号就是"上传素材"，项目名是系统内部的档案概念——不该让人先答一道题。
+// 所以这里落一个默认项目并**回写**到会话页：生产提交时带上它，镜头才会用这张图当首帧。
+// 需要多张 / 场景图 / 选裁切方式时走「参考图」抽屉（同一套后端接口，不是第二套逻辑）。
+const DEFAULT_PROJECT = "我的短片";
+
+async function quickAddMaterials(files) {
+  if (!files.length) return;
+  const pid = $("projectInput").value.trim() || DEFAULT_PROJECT;
+  $("projectInput").value = pid;                 // 回写：素材与生产必须挂在同一个项目上
+  ideaTip(`正在登记 ${files.length} 张素材…`);
+  let ok = 0, firstErr = "";
+  const keys = [];
+  for (const f of files) {
+    const key = baseName(f.name) || ("素材" + (ok + 1));
+    try {
+      await postJson("/api/ref", { project: pid, kind: "character", key: key, name: key,
+                                   mode: "auto", preview: false, image: await fileData(f) });
+      ok++; keys.push(key);
+    } catch (e) { firstErr = firstErr || (key + "：" + e.message); }
+  }
+  if (ok) paintQuickArt(pid, keys);
+  ideaTip(ok ? `素材已就位（角色参考 ×${ok}）· 项目「${pid}」——说说要拍什么`
+             : (firstErr || "素材没传上去"), !ok);
+}
+
+function paintQuickArt(pid, keys) {
+  const box = $("quickArt");
+  box.hidden = !keys.length;
+  box.innerHTML = keys.map(k => `<img alt="" src="${withToken("/api/ref/image?project="
+    + encodeURIComponent(pid) + "&kind=character&key=" + encodeURIComponent(k))}">`).join("")
+    + (keys.length ? `<span class="qa-tip">已作为角色参考 · 想换成场景图或调裁切，点上面的「角色一致性」</span>` : "");
+}
+
+$("quickRef").onchange = async () => {
+  const files = Array.from($("quickRef").files);
+  $("quickRef").value = "";          // 清空，允许再选同一张
+  await quickAddMaterials(files);
+};
 const PILL_ACTS = {
   seedance: () => { $("providerSel").value = "zhipu"; ideaTip("已选：智谱 AI 真视频（免费档）"); },
   focus: () => $("ideaInput").focus(),
