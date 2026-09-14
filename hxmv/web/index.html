@@ -211,11 +211,8 @@
     .row > select, .row > input { flex: 1 1 100%; }
     #submitCard textarea { height: 76px; }
   }
-  /* 连接状态挂在顶栏（点一下去设置填令牌）——配置类的东西一律在「设置」里，不占生产页 */
-  #connChip { margin-left: auto; background: var(--panel2); border: 1px solid var(--border); color: var(--dim);
-              border-radius: 999px; padding: 4px 12px; font-size: 12px; }
-  #connChip.ok { color: var(--accent-strong); border-color: rgba(76,195,138,.42); background: rgba(76,195,138,.12); }
-  #brainBadge { margin-left: 10px; }
+  /* 连接（含状态）只出现在「设置」里，生产页顶栏不摆任何配置/连接相关的东西 */
+  #brainBadge { margin-left: auto; }
   /* 空对话不留空框 */
   #chatLog:empty { display: none; }
 </style>
@@ -228,7 +225,6 @@
     <button class="tab on" data-page="produce">生产</button>
     <button class="tab" data-page="settings">设置</button>
   </nav>
-  <button id="connChip" class="chip">未连接</button>
   <div id="brainBadge"></div>
 </header>
 
@@ -393,16 +389,12 @@ async function apiGet(path) {
 // 不能再拿「TOKEN 是不是空」当「没连上」（真机踩过：状态卡在「未填令牌」）
 async function refreshConn() {
   const el = $("connStatus");
-  const chip = $("connChip");
-  const setChip = (text, ok) => { chip.textContent = text; chip.className = ok ? "chip ok" : "chip"; };
   try {
     const d = await (await hx("/api/health")).json();
-    if (d.authed) { el.textContent = "已连接 · " + d.server; setChip("已连接", true); return; }
+    if (d.authed) { el.textContent = "已连接 · " + d.server; return; }
     el.textContent = d.needs_token ? (TOKEN ? "令牌不对" : "未填令牌") : "连不上";
-    setChip("未连接", false);
   } catch (e) {
     el.textContent = "连不上";
-    setChip("未连接", false);
   }
 }
 // 令牌不回显到输入框（截图/旁观就漏了）；要换令牌直接在这粘贴新的再点连接
@@ -681,9 +673,7 @@ function showPage(name) {
   if (name === "settings") refreshConfig();
 }
 document.querySelectorAll("nav.tabs .tab").forEach(b => { b.onclick = () => showPage(b.dataset.page); });
-// 顶栏连接状态：点一下直接去设置填令牌（配置都在设置里）
-$("connChip").onclick = () => showPage("settings");
-// 连令牌都没有 = 还没配好，直接落到设置页（省得在生产页干等）
+// 连令牌都没有 = 还没配好，直接落到设置页（配置都在设置里）
 if (!TOKEN) showPage("settings");
 
 // ---------- 设置页：接口配置 ----------
