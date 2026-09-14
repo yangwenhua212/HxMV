@@ -37,7 +37,9 @@ _FP_KEYS = ("prompt", "duration", "resolution", "fps", "seed", "reference_streng
             "motion_scale", "audio_gain_db", "trim_black", "character", "scene", "style",
             "with_audio", "scene_strength",
             # 语义守卫：改的是发给模型的提示词 → 必须进指纹，否则命中缓存、修了等于没修
-            "_guard_closer", "_guard_action", "_guard_emotion", "_guard_continuity")
+            "_guard_closer", "_guard_action", "_guard_emotion", "_guard_continuity",
+            # v0.8 新增两条守卫（清晰度 / 单镜头）：同样改的是发给模型的提示词
+            "_guard_sharp", "_guard_single_shot")
 
 
 def fp_params(task, project=None, provider: str | None = None,

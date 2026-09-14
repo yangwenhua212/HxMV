@@ -35,11 +35,32 @@ THRESHOLDS = {
     "duration_ratio_low": 0.75,  # 实际/期望时长比值低于此 → too_short
     "duration_ratio_high": 1.30,  # 高于此 → too_long
     "min_bitrate_per_pixel": 0.02,  # 只作参考指标记录，不参与判缺陷（见 detect_defects 注释）
+
+    # ---------- 画面模糊（blurdetect，拉普拉斯方差类度量）----------
+    # 标定（本机 local 渲染基准，1280x720）：清晰原片均值 5.13 → gblur sigma=1.5 时 8.93
+    # → sigma=4 时 11.95。取 12.0 = "明显糊成一团"才判，轻微发软不误杀。
+    # 注意：这是**内容相关**的绝对量（纹理少的画面天然低），接真实 AI 视频后应重新标定。
+    "max_blur_mean": 12.0,
+    # 极模糊时 blurdetect 输出 `nan`（梯度分母为 0）——检测到就按"糊到量不出"处理
+    "blur_unmeasurable": 999.0,
+
+    # ---------- 镜头切换（scdet）----------
+    # 标定：红→蓝硬切换单帧 score=15.6，静止/连续画面 ≈0（实测 local 成片两镜头拼接最大仅 2.5）。
+    # 超过 10 记一次切换；单镜头任务允许多少次切换由 max_scene_cuts 定。
+    "scene_cut_score": 10.0,
+    "max_scene_cuts": 0,
+
+    # ---------- 响度与静音（loudnorm / silencedetect）----------
+    "min_lufs": -40.0,           # EBU R128 综合响度低于此 → low_volume（比 mean_volume 更贴近人耳）
+    "silence_db": -50.0,         # silencedetect 的静音门限
+    "silence_min_seconds": 0.5,  # 短于此时长的静音不算一段
+    "silence_ratio": 0.90,       # 静音累计占比超过此 → silent_audio（有音轨但等于没有）
 }
 
 # 缺陷键必须与 core/critic.py 的 DEFECT_FIXES 对齐（那里定义修正方向）
 DEFECT_KEYS = ("black_frame", "low_clarity", "fps_too_low", "low_volume", "no_audio",
-               "frozen_frame", "too_short", "too_long")
+               "frozen_frame", "too_short", "too_long",
+               "blurry", "multi_shot", "silent_audio")
 
 _FFMPEG = None
 
@@ -273,6 +294,89 @@ def measure_black_freeze_loudness(path: str,
     return round(black, 3), round(freeze, 3), (float(mv.group(1)) if mv else None)
 
 
+def measure_extended(path: str, duration: float | None = None) -> dict:
+    """一次解码量出：画面模糊度 / 镜头切换次数 / EBU R128 响度 / 静音段占比。
+
+    为什么不并进 measure_black_freeze_loudness：那条链的阈值已经标定过，
+    再塞进 loudnorm（会归一化音频）与 blurdetect（依赖缩放与内容尺度）会互相影响，
+    既有标定全部作废。新指标独立成链，代价是多一次解码——值得。
+
+    三条实测坑（写在这里省得下次再踩）：
+    1. `metadata=print` 必须紧跟在**产生它的滤镜之后**。放在 scdet 之前时，
+       那一帧的 lavfi.scd.score 还没写上去，打印出来是空的（实测样本数 0）。
+    2. 极度模糊时 blurdetect 输出 `nan`（梯度分母为 0）。只抓数字的正则会把它
+       当成"没测到"→ 漏判最该抓的那一类糊。这里显式转成 blur_unmeasurable。
+    3. loudnorm 对**全静音**音轨输出 `-inf`；解析成 float 后是 -inf，不能直接当响度用，
+       要转成 None 并交给 silencedetect 的占比去判（否则会得出一条 -inf 的假指标）。
+    """
+    if not has_ffmpeg() or not is_media_file(path):
+        return {}
+    t = THRESHOLDS
+    vf = (f"blurdetect=low=0.1:high=0.5,metadata=mode=print:key=lavfi.blur,"
+          f"scdet=threshold={t['scene_cut_score']},"
+          f"metadata=mode=print:key=lavfi.scd.score")
+    # 顺序有讲究：volumedetect/silencedetect 要先看**原始**信号，loudnorm 放最后
+    af = (f"volumedetect,"
+          f"silencedetect=n={t['silence_db']}dB:d={t['silence_min_seconds']},"
+          f"loudnorm=print_format=json")
+    rc, out = _run(["ffmpeg", "-hide_banner", "-i", path, "-vf", vf, "-af", af, "-f", "null", "-"])
+    if rc != 0 and not out:
+        return {}
+
+    # ---- 模糊度 ----
+    blurs: list[float] = []
+    unmeasurable = False
+    for token in re.findall(r"lavfi\.blur=(\S+)", out):
+        try:
+            val = float(token)
+        except ValueError:
+            unmeasurable = True       # nan / inf 等非数字写法
+            continue
+        if math.isnan(val) or math.isinf(val):
+            unmeasurable = True
+        else:
+            blurs.append(val)
+    blur_mean = round(sum(blurs) / len(blurs), 3) if blurs else None
+    blur_max = (t["blur_unmeasurable"] if unmeasurable
+                else (round(max(blurs), 3) if blurs else None))
+
+    # ---- 镜头切换：得分超过阈值的帧数就是切换次数 ----
+    scores = [float(x) for x in re.findall(r"lavfi\.scd\.score=([\d.]+)", out)]
+    cuts = sum(1 for s in scores if s > t["scene_cut_score"])
+
+    # ---- 响度（LUFS）与静音段 ----
+    lufs: float | None = None
+    m_i = re.search(r'"input_i"\s*:\s*"([^"]+)"', out)
+    if m_i:
+        try:
+            val = float(m_i.group(1))
+            lufs = None if (math.isnan(val) or math.isinf(val)) else val
+        except ValueError:
+            lufs = None
+
+    silence, last = 0.0, None
+    for line in out.splitlines():
+        m = re.search(r"silence_(start|end):\s*([\d.]+)", line)
+        if not m:
+            continue
+        if m.group(1) == "start":
+            last = float(m.group(2))
+        elif last is not None:
+            silence += max(0.0, float(m.group(2)) - last)
+            last = None
+    if last is not None and duration:      # 一直静音到片尾
+        silence += max(0.0, duration - last)
+
+    return {
+        "blur_mean": blur_mean,
+        "blur_max": blur_max,
+        "scene_cuts": cuts,
+        "lufs": round(lufs, 2) if lufs is not None else None,
+        "silence_seconds": round(silence, 3),
+        "silence_ratio": round(silence / duration, 3) if duration else None,
+    }
+
+
 def leading_black_seconds(path: str) -> float:
     """片头黑场时长（秒）——第一个黑段从 0 开始才算。
 
@@ -365,17 +469,26 @@ def cleanup_frames(tmp: str) -> None:
 # ---------- 汇总：一次测量 → 指标 + 缺陷 ----------
 
 def detect_defects(m: dict, expect_duration: float | None = None,
-                   expect_audio: bool = False) -> list[str]:
+                   expect_audio: bool = False,
+                   expect_single_shot: bool = False) -> list[str]:
     """从量出来的指标推缺陷（纯判据，可单测）。
 
     expect_audio：**默认无声**——AI 视频本来就不带音轨，用户没要音频时"没音轨"是正常状态，
     不是缺陷（判它就会每条都废片，还会派生一个修不动的 enable_audio）。
     只有任务明确要音频（with_audio）时，缺音轨/音量低才算缺陷。
+
+    expect_single_shot：**只有单镜头任务**（GENERATE_SHOT）才谈"镜头切换是缺陷"。
+    成片（COMPOSE）本来就是多镜头拼的，拿它判 multi_shot 会把每一部成片都判死、
+    还会派生一个永远修不好的 rewrite_prompt_single_shot。
     """
     t = THRESHOLDS
     defects: list[str] = []
     if (m.get("height") or 0) < t["min_height"]:
         defects.append("low_clarity")
+    # 模糊与"分辨率不足"是两种病，必须分开判：升分辨率修不好对焦糊，改提示词也修不好像素不够。
+    # 混成一个 low_clarity 时，糊片会被反复升分辨率、永远修不好（修正方向从一开始就是错的）。
+    if (m.get("blur_mean") or 0) > t["max_blur_mean"] or (m.get("blur_max") or 0) >= t["blur_unmeasurable"]:
+        defects.append("blurry")
     # 每像素码率只作**参考指标**记录，不单独判缺陷：
     # 静态/低细节内容码率天然低（实测干净的 1080p 静止镜头 < 0.02 bpp 也完全清晰），
     # 拿它当\"清晰度\"会把正常片子判死。真正的模糊要靠帧内高频能量，属于后续升级。
@@ -386,12 +499,26 @@ def detect_defects(m: dict, expect_duration: float | None = None,
         m["bitrate_per_pixel"] = None
     if m.get("fps") and m["fps"] < t["min_fps"]:
         defects.append("fps_too_low")
+    # 单镜头任务里出现镜头切换 = 模型自己剪了片，画面内容已经不是"一个连续镜头"。
+    # 只对单镜头任务判：成片（COMPOSE）本来就是多镜头拼的，判它就是每条都废片。
+    if expect_single_shot and (m.get("scene_cuts") or 0) > t["max_scene_cuts"]:
+        defects.append("multi_shot")
     vol = m.get("mean_volume_db")
     if expect_audio:
-        # 要了音频才谈音频缺陷；且"没音轨"与"音量低"是两种病（增益对不存在的音轨是空操作）
+        # 要了音频才谈音频缺陷；三种病分开治（修正方向完全不同）：
+        # ① 没音轨——对不存在的音轨做增益是空操作，得让模型真的带音频；
+        # ② 有音轨但几乎全程静音——增益同样是空操作，也得让模型真的出声；
+        # ③ 只是偏轻——增益有用。
+        # 用 `"lufs" in m` 而不是 `m.get("lufs") is None`：**没测量**与**测出来是静音**
+        # （loudnorm 对全静音给 -inf）必须区分，否则没有该指标的调用路径会被误判成静音。
         if not m.get("has_audio"):
             defects.append("no_audio")
-        elif vol is not None and vol < t["min_mean_volume_db"]:
+        elif m.get("silence_ratio") is not None and m["silence_ratio"] >= t["silence_ratio"]:
+            defects.append("silent_audio")
+        elif "lufs" in m and m.get("lufs") is None:
+            defects.append("silent_audio")
+        elif ((vol is not None and vol < t["min_mean_volume_db"])
+              or (m.get("lufs") is not None and m["lufs"] < t["min_lufs"])):
             defects.append("low_volume")
     # 没要音频 → 有声无声都不判缺陷，只作遥测（默认无声）
     if (m.get("black_seconds") or 0) > t["black_seconds"]:
@@ -409,7 +536,8 @@ def detect_defects(m: dict, expect_duration: float | None = None,
 
 
 def inspect(path: str | None, expect_duration: float | None = None,
-            expect_audio: bool = False) -> dict | None:
+            expect_audio: bool = False,
+            expect_single_shot: bool = False) -> dict | None:
     """量一个媒体文件：返回指标 + defects；不是真文件/没 ffmpeg → None（调用方回落 mock 标签）。"""
     if not is_media_file(path):
         return None
@@ -423,15 +551,28 @@ def inspect(path: str | None, expect_duration: float | None = None,
     m["mean_volume_db"] = vol
     m["black_seconds"] = black
     m["freeze_seconds"] = freeze
-    m["defects"] = detect_defects(m, expect_duration, expect_audio)
+    # 第二趟量扩展判据（模糊/切换/响度/静音占比）——独立一条链，不动上面已标定的那条
+    m.update(measure_extended(str(path), container.get("duration")))
+    m["defects"] = detect_defects(m, expect_duration, expect_audio, expect_single_shot)
     return m
 
 
 def describe(m: dict) -> str:
-    """指标 → 一行中文摘要（终端/面板展示用）。"""
+    """指标 → 一行中文摘要（终端/面板展示用）。
+
+    新增指标只在测到时才出现：没跑扩展探针的路径（老 run 记录、mock 世界）
+    摘要保持原样，不会凭空多出 `模糊度None` 这种噪声。
+    """
     fps = f"{m['fps']:.0f}" if m.get("fps") else "?"
     vol = (f"{m['mean_volume_db']:.1f}dB" if m.get("has_audio")
            else "无声（默认）")
-    return (f"实测 {m.get('width')}x{m.get('height')}@{fps}fps "
+    line = (f"实测 {m.get('width')}x{m.get('height')}@{fps}fps "
             f"{m.get('duration') or 0:.1f}s 音频{vol} "
             f"黑帧{m.get('black_seconds') or 0:.2f}s 静止{m.get('freeze_seconds') or 0:.2f}s")
+    if m.get("blur_mean") is not None:
+        line += f" 模糊度{m['blur_mean']:.1f}"
+    if m.get("scene_cuts"):
+        line += f" 切换{m['scene_cuts']}"
+    if m.get("lufs") is not None:
+        line += f" 响度{m['lufs']:.1f}LUFS"
+    return line

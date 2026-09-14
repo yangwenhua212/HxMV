@@ -27,6 +27,10 @@ _ADJUST = {
     "rewrite_prompt_action":       ("input", "_guard_action", None, True),
     "rewrite_prompt_emotion":      ("input", "_guard_emotion", None, True),
     "rewrite_prompt_continuity":   ("input", "_guard_continuity", None, True),
+    # v0.8：blurdetect 判出的糊 / scdet 判出的"模型自己剪了片"，都得靠提示词锁
+    # （分辨率与帧率已经分别由 low_clarity / fps_too_low 负责，别混）
+    "rewrite_prompt_sharp":        ("input", "_guard_sharp", None, True),
+    "rewrite_prompt_single_shot":  ("input", "_guard_single_shot", None, True),
 }
 
 _HUMAN_HINT = {
@@ -44,6 +48,8 @@ _HUMAN_HINT = {
     "rewrite_prompt_action": "动作与分镜不符 → 提示词锁死动作",
     "rewrite_prompt_emotion": "情绪与分镜不符 → 提示词锁死情绪/氛围",
     "rewrite_prompt_continuity": "与前后镜不连续 → 提示词补衔接约束",
+    "rewrite_prompt_sharp": "画面模糊 → 提示词锁清晰度（锐利对焦/细节清晰）",
+    "rewrite_prompt_single_shot": "模型自己剪了镜头 → 提示词锁「一个连续镜头、无剪辑」",
 }
 
 # 哪些修正的效果**会**出现在实测值里（ffprobe/blackdetect/freezedetect/音量）。
@@ -75,13 +81,16 @@ _FIX_PRIORITY = {
     "action_mismatch": 2,
     "emotion_wrong": 2,
     "plot_break": 2,
+    "multi_shot": 2,      # 模型自己剪了片 = 内容不符，跟"动作/情绪不对"同档，优先于物理项
     "semantic_mismatch": 3,
     "low_clarity": 4,
+    "blurry": 4,          # 与清晰度不足同档（都是"画面不够精致"）
     "fps_too_low": 5,
     "motion_blur": 5,
     "frozen_frame": 5,
     "no_audio": 6,
     "low_volume": 6,
+    "silent_audio": 6,    # 与"没音轨/音量低"同档，但修正方向不同（见 DEFECT_FIXES）
     "black_frame": 7,
     "too_short": 8,
     "too_long": 8,

@@ -16,6 +16,7 @@
     GET  /api/ref/image?project=&kind=&key= → 取参考图字节（面板缩略图）
     POST /api/ref                → **上传参考图**（含 auto 自动裁主视觉；preview=true 只预览不落库）
     DELETE /api/ref              → 注销一张参考图
+    POST /api/approve {run_id,approve} → 人工审批点：批准/拒绝待确认的动作（花钱之前）
     GET  /dl/<文件名>            → 分发包下载（客户端安装包等，放 ~/.hxmv/dl/，公开不带 token）
 
 客户端友好（HxSync）：
@@ -35,6 +36,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -55,6 +57,27 @@ WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "inde
 # 公网防护：设置 HXMV_WEB_TOKEN 后，所有 /api/* 请求需带 token
 # （header X-Hxmv-Token 或 query ?token=，EventSource 只能用 query）
 HXMV_WEB_TOKEN = os.environ.get("HXMV_WEB_TOKEN", "")
+
+
+def token_ok(given: str) -> bool:
+    """令牌比较：未配置令牌时全放行；配置了就一律走**常量时间**比较。
+
+    为什么不用 `given == TOKEN`：`==` 按字符短路比较，比较耗时随"猜对了几个前缀"
+    变化，理论上可被计时侧信道逐字节猜出令牌。本地部署风险低，但这里是一行的事。
+    令牌含非 ASCII 时 compare_digest 会抛 TypeError，此时退回普通比较（功能优先）。
+    """
+    if not HXMV_WEB_TOKEN:
+        return True
+    try:
+        return secrets.compare_digest(given, HXMV_WEB_TOKEN)
+    except TypeError:
+        return given == HXMV_WEB_TOKEN
+
+
+# 人工审批点（checkpoint）策略：none=不审批 / each=每个生成动作都问 / paid=只问计费动作。
+# 超时**按拒绝**处理：面板关掉了、人不在，宁可停在那儿也别默默花钱。
+APPROVE_POLICY = os.environ.get("HXMV_APPROVE", "none").strip().lower()
+APPROVE_TIMEOUT = float(os.environ.get("HXMV_APPROVE_TIMEOUT", "300") or 300)
 
 # 参考图上传：只收图片，硬限制体积（面板在手机上用，别让一张原图把内存撑爆）
 MAX_REF_B64 = 16 * 1024 * 1024          # base64 字符串上限 ≈ 12MB 原图
@@ -115,6 +138,9 @@ class RunManager:
         self.recorders: dict[str, RunRecorder] = {}
         self._active: set[str] = set()
         self.lock = threading.Lock()
+        # 待人工审批的 checkpoint：run_id -> {task_id, action, event, approved}
+        # worker 在这里阻塞等人点按钮，HTTP 线程通过 /api/approve 把它唤醒。
+        self.pending: dict[str, dict] = {}
         # 正在跑/排队中的 run_id——用来分辨「进行中」和「被中断」
         # （服务重启/进程被杀时，磁盘上那些没有 run.done 的 run 会一直显示"进行中"，
         #  真机反馈过：面板说进行中，其实早就断了，白等。ACTIVE_RUNS 由 submit 登记）
@@ -155,8 +181,13 @@ class RunManager:
                 from .core.project import Project
                 proj = Project.load(job["project"])
             try:
+                # executor 必须先建：审批回调要问它"这个动作花不花钱"，
+                # 且必须与实际执行用的是同一个实例（否则审批看的是 A、跑的是 B）
+                from .core.executor import make_executor
+                executor = make_executor(project=proj)
                 run(job["goal"], brain=Brain(), project=proj,
-                    verbose=False, emit=rec.emit)
+                    verbose=False, emit=rec.emit, executor=executor,
+                    approve=self._approver(run_id, rec, executor))
             except Exception as e:  # 内核异常也要把 run 收尾，别让订阅者挂死
                 rec.emit({"type": "run.done", "phase": "ERROR",
                           "error": str(e), "completed": [], "failed": [], "attempts": 0,
@@ -167,6 +198,70 @@ class RunManager:
                     self._active.discard(run_id)
                 rec.done = True
                 self._notify_done(run_id, job, rec)
+
+    # ---------- 人工审批点（checkpoint） ----------
+    @staticmethod
+    def _costs_money(executor, action: str) -> bool:
+        try:
+            return float(executor.provider.estimate_cost(action)) > 0
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def _approver(self, run_id: str, rec, executor):
+        """构造审批回调（策略为 none 时返回 None —— 闭环完全不感知"审批"这件事）。
+
+        worker 在这**阻塞**等人点按钮：这是刻意的——面板上的这次 run 就停在
+        "马上要花钱"的那一刻。超时/面板关了 → 按拒绝处理（宁可不做，也不默默花钱）。
+        """
+        policy = APPROVE_POLICY
+        if policy in ("", "none"):
+            return None
+
+        def approve(task) -> bool | None:
+            if policy == "paid" and not self._costs_money(executor, task.action):
+                return None
+            slot = {
+                "task_id": task.task_id,
+                "action": task.action,
+                "prompt": str(task.input.get("prompt") or task.input.get("goal") or "")[:80],
+                "event": threading.Event(),
+                "approved": False,
+            }
+            with self.lock:
+                self.pending[run_id] = slot
+            rec.emit({"type": "checkpoint.request", "task_id": task.task_id,
+                      "action": task.action, "prompt": slot["prompt"],
+                      "timeout": APPROVE_TIMEOUT,
+                      "note": f"等待人工确认（{APPROVE_TIMEOUT:.0f}s 内无响应按拒绝）"})
+            try:
+                answered = slot["event"].wait(APPROVE_TIMEOUT)
+            finally:
+                with self.lock:
+                    self.pending.pop(run_id, None)
+            if not answered:
+                rec.emit({"type": "checkpoint", "task_id": task.task_id,
+                          "action": task.action, "approved": False,
+                          "note": f"等待超时（{APPROVE_TIMEOUT:.0f}s）→ 按拒绝处理"})
+                return False
+            return bool(slot["approved"])
+
+        return approve
+
+    def resolve_checkpoint(self, run_id: str, approved: bool) -> bool:
+        """面板点了批准/拒绝 → 唤醒阻塞中的 worker。返回是否真的有待审批项。"""
+        with self.lock:
+            slot = self.pending.get(run_id)
+        if slot is None or slot["event"].is_set():
+            return False
+        slot["approved"] = bool(approved)
+        slot["event"].set()
+        return True
+
+    def pending_checkpoint(self, run_id: str) -> dict | None:
+        """当前卡在哪个人工确认上（面板刷新后据此恢复按钮，没有则 None）。"""
+        with self.lock:
+            slot = self.pending.get(run_id)
+        return {k: v for k, v in slot.items() if k != "event"} if slot else None
 
     @staticmethod
     def _notify_done(run_id: str, job: dict, rec) -> None:
@@ -187,6 +282,15 @@ class RunManager:
 # 正在跑/排队中的 run_id（RunManager 启动时把它指向自己的活跃集合，供 _scan_runs 判断
 # 「进行中」还是「被中断」——没有它，服务重启后残留的 run 会永久显示"进行中"）
 ACTIVE_RUNS: set[str] = set()
+
+# run_id 白名单：只认 `YYYYMMDD-HHMMSS-xxxx`。所有拿 run_id 拼路径/做键的入口都先过它，
+# 挡住 `../../` 之类的穿越（产物取回、事件回放、人工审批唤醒都用同一个口径）。
+_RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
+
+
+def _bad_run_id(run_id: str) -> bool:
+    """run_id 不合法返回 True。"""
+    return not bool(_RUN_ID_RE.match(str(run_id or "")))
 
 MANAGER = RunManager()
 
@@ -305,7 +409,7 @@ class Handler(BaseHTTPRequestHandler):
         tok = ((self.headers.get("X-Hxmv-Token") or "").strip()
                or ((q.get("token") or [""])[0]).strip()
                or self._cookie_token())
-        return tok == HXMV_WEB_TOKEN
+        return token_ok(tok)
 
     @staticmethod
     def _fix_mojibake(s: str) -> str:
@@ -356,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
             # 可收藏的私人入口：/k/<令牌> → 带上令牌的面板地址。
             # 手机书签用：地址栏里永远带着令牌，不怕 localStorage 被清。
             tok = unquote(p[3:]).strip()
-            if tok and tok == HXMV_WEB_TOKEN:
+            if tok and token_ok(tok):
                 self.send_response(302)
                 self.send_header("Location", "/?token=" + quote(tok))
                 self.send_header("Set-Cookie", self._token_cookie(tok))
@@ -378,7 +482,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store")
                 q = parse_qs(urlparse(self.path).query)
                 tok = ((q.get("token") or [""])[0]).strip()
-                if tok and tok == HXMV_WEB_TOKEN:
+                if tok and token_ok(tok):
                     # 顺手种一年 Cookie：下次不带 ?token= 打开也认
                     self.send_header("Set-Cookie", self._token_cookie(tok))
                 self.end_headers()
@@ -716,6 +820,21 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(HOOKS_DIR, name + ".jsonl"), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
             self._send_json({"ok": True})
+            return
+        if u.path == "/api/approve":
+            # 人工审批点：面板点"批准/拒绝"→ 唤醒阻塞中的 worker（此时还没花钱）
+            if not self._authed():
+                self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
+                return
+            body = self._read_body()
+            run_id = str(body.get("run_id", "")).strip()
+            if _bad_run_id(run_id):
+                self._send_err(400, "run_id 格式不对")
+                return
+            approved = bool(body.get("approve"))
+            ok = MANAGER.resolve_checkpoint(run_id, approved)
+            self._send_json({"ok": ok, "approved": approved,
+                             "detail": "已处理" if ok else "没有待审批的动作（可能已超时或被处理过）"})
             return
         if u.path == "/api/config":
             # 保存接口配置（面板设置页用）。Key 只写进 ~/.hxmv/config.json(600)，不回传明文。

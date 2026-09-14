@@ -510,6 +510,12 @@ class ZhipuVideoProvider(VideoProvider):
         if inp.get("_guard_continuity"):
             parts.append("continue seamlessly from the previous shot: same character, "
                          "same scene, same costume, same lighting")
+        # v0.8：L1 用 blurdetect 量出"糊"、用 scdet 量出"模型自己剪了片"，
+        # 这两类在生成端唯一的杠杆就是提示词本身（分辨率/帧率已有各自旋钮）。
+        if inp.get("_guard_sharp"):
+            parts.append("very sharp focus, crisp details, high clarity — not blurry, not soft")
+        if inp.get("_guard_single_shot"):
+            parts.append("one single continuous shot, no cuts, no scene change, no montage")
         # 角色/场景的**美术描述**也要进提示词：首帧图 + 文字双重锚定，是跨镜头一致性的两个抓手。
         # （档案里存的是出资产图时那份改写过的具体描述。）
         char_desc = self._project_desc("character", cons.get("character"))

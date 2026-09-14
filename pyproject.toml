@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hxmv"
+version = "0.7.0"
+description = "HxMV：自主内容生产智能体（规划 → 执行 → 观察 → 判断 → 修正）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "yangwenhua212" }]
+# 运行时零第三方依赖是项目的硬约束（部署门槛低、不会被依赖腐烂拖死）。
+# 这里显式留空：想引入依赖时，先想清楚是否愿意放弃"零依赖"这个卖点。
+dependencies = []
+keywords = ["agent", "video-generation", "control-loop", "mcp", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/yangwenhua212/HxMV"
+
+[project.scripts]
+hxmv = "hxmv.__main__:main"
+
+[project.optional-dependencies]
+# 可选增强：只影响参考图的处理质量（没装也能跑，会自动回落 ffmpeg）
+# 开发期工具：test 不需要任何安装，纯标准库 unittest
+dev = ["ruff>=0.6"]
+
+[tool.setuptools]
+packages = ["hxmv", "hxmv.core", "hxmv.media", "hxmv.providers"]
+
+[tool.setuptools.package-data]
+hxmv = ["web/*.html"]
+
+# ---------------------------------------------------------------- 测试
+# 测试用标准库 unittest（零安装即可跑），pytest 也能直接收：
+#   python -m unittest discover -s tests -v
+#   pytest -q
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+# ---------------------------------------------------------------- lint
+# 目标：抓真问题（未使用导入/未定义名/可疑比较），不参与格式争论。
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["hxmv/web"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes（未使用导入、未定义名——真 bug）
+    "W",    # pycodestyle warnings
+    "I",    # import 排序
+    "UP",   # pyupgrade（3.10+ 写法）
+    "B",    # flake8-bugbear（可变默认参数、可疑比较等）
+]
+ignore = [
+    "E501",   # 行宽由 formatter 管；注释里有表格，强行折行可读性更差
+    "B008",   # 函数默认值里调用函数：本项目的 frozen dataclass 用法是有意的
+    "UP038",  # isinstance 元组写法：保持 3.10 兼容写法
+]
+
+[tool.ruff.lint.per-file-ignores]
+# provider 示例文件刻意保留未使用参数与 TODO 骨架，供接入方照抄
+"hxmv/providers/kling_example.py" = ["ARG001"]

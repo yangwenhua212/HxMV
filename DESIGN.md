@@ -90,6 +90,20 @@
    - **实际用了哪类参考图要进画面指纹**：不然把 ref_use 从角色改成场景，指纹不变 → 复用旧画面
    - 给参考的那类才判定一致性（`reference_kind` 记录，critic 只问给过参考的那一类）
 
+4.3 **判据要能分开「病」，修正方向才对得上**
+   v0.8 用 ffmpeg 自带滤镜补了四类过去量不出来的缺陷（`blurdetect` / `scdet` / `loudnorm` /
+   `silencedetect`，**零新依赖**）。关键不是"多量了几个数"，而是把原来混在一起的病拆开：
+
+   - **糊 ≠ 不够清晰**：分辨率不足 → 升分辨率；对焦/细节糊 → 改提示词锁清晰度。
+     两者混成一个 `low_clarity` 时，糊片会被反复升分辨率，**永远修不好**（方向从一开始就错）。
+   - **模型自己剪了片**：单镜头任务里出现镜头切换 → 提示词锁"一个连续镜头"。
+     判据必须带 `expect_single_shot` 门控——成片本来就由多镜头拼成，拿它判成片等于每部都判死。
+   - **三种音频病**：没音轨 / 有音轨但全程静音 / 只是偏轻。前两种做增益是**空操作**
+     （得让模型真的出声）。还要区分"**没测量**"与"**测出来是静音**"（loudnorm 对全静音给
+     `-inf` → None）：混为一谈会让没有该指标的调用路径凭空被判 silent_audio。
+
+   新判据同样遵守"守卫必须真改提示词"的铁律：`_guard_sharp` / `_guard_single_shot` 都进了 `_FP_KEYS`。
+
 5. **上下文动态压缩**
    不固定"每 N 镜头压缩一次"，而是 observations 估算 token 超阈值才压缩
    （折叠最旧保留最新），由 ContextManager 统一管。
@@ -129,6 +143,11 @@ hxmv/
 │       ├── controller.py# PASS/RETRY/FAIL + 记忆回写
 │       ├── context.py   # 动态压缩
 │       └── loop.py      # Autonomous Control Loop（emit 事件旁路）
+├── tests/
+│   └── test_core.py     # 纯标准库单测：判据 / 指纹白名单 / 调参 / 记忆 / 评审并行
+├── .github/workflows/ci.yml  # 单测 + Mock 端到端 + 真渲染冒烟（3.10/3.12/3.13）
+├── pyproject.toml       # 打包与工具配置（零运行时依赖是硬约束）
+├── .gitattributes       # 行尾统一 LF（Windows/Unix 协作者不再互踩假 diff）
 ├── README.md
 └── DESIGN.md
 ```
@@ -157,6 +176,11 @@ mock 世界的缺陷是 executor 按概率"贴标签"的，Critic 读标签—�
 | `freeze_seconds` | 0.80 | `freezedetect(n=0.002)` 累计静止超此判 `frozen_frame` |
 | `min_consistency` | 0.90 | 外观一致度低于此判 `character/scene_inconsistency` |
 | `duration_ratio_*` | 0.75 / 1.30 | 实际/期望时长比值越界判 `too_short` / `too_long` |
+| `max_blur_mean` | 12.0 | `blurdetect` 均值超此判 `blurry`。标定：清晰原片 5.13 → gblur σ=1.5 时 8.93 → σ=4 时 11.95（1280x720 合成素材）。**内容相关**，接真 AI 视频后应重标 |
+| `blur_unmeasurable` | 999.0 | 极模糊时 blurdetect 输出 `nan`（梯度分母为 0）——显式转成大值，否则最该抓的那类糊会被当成"没测到" |
+| `scene_cut_score` / `max_scene_cuts` | 10.0 / 0 | `scdet` 单帧得分超 10 记一次切换。标定：红→蓝硬切 15.6，连续画面 ≈0（local 两镜头拼接最大仅 2.5）；**只对单镜头任务**判 `multi_shot` |
+| `min_lufs` | -40.0 | EBU R128 综合响度（`loudnorm`）低于此判 `low_volume`——与 mean_volume 任一越界即判，比单一 dB 更贴近人耳 |
+| `silence_ratio` | 0.90 | `silencedetect` 静音累计占比超此判 `silent_audio`（有音轨但等于没有；增益对它无效，得让模型真出声） |
 
 **每像素码率不进判据**：静态/低细节内容码率天然低，实测干净的 1080p 静止镜头 < 0.02 bpp 也完全清晰，
 拿它当"清晰度"会把正常片子判死（踩过）。真模糊要靠帧内高频能量，属后续升级。

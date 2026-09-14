@@ -602,6 +602,23 @@ async function refreshRuns() {
   }
 }
 
+// 人工审批点：批准/拒绝。这一步发生在**花钱之前**，所以按钮必须显眼且不可误触。
+async function sendApprove(ev, approved, div) {
+  const note = div.querySelector(".ckNote");
+  const btns = div.querySelectorAll(".ckRow button");
+  btns.forEach(b => { b.disabled = true; });
+  try {
+    const d = await (await hx("/api/approve", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: currentRun || "", task_id: ev.task_id, approve: approved })
+    })).json();
+    if (note) note.innerHTML = `<span style="color:var(--dim)">${esc(d.detail || (d.ok ? "已处理" : "没有待审批项"))}</span>`;
+  } catch (e) {
+    if (note) note.innerHTML = `<span style="color:var(--red)">提交失败：${esc(e.message)}</span>`;
+    btns.forEach(b => { b.disabled = false; });
+  }
+}
+
 // ---------- 渲染事件 ----------
 function renderEvent(ev, container) {
   const div = document.createElement("div");
@@ -617,6 +634,18 @@ function renderEvent(ev, container) {
     div.innerHTML = t + `<div class="title" style="color:var(--amber)">服务繁忙，重试 ${ev.attempt}/4</div>`;
   } else if (ev.type === "infra.abort") {
     div.innerHTML = t + `<div class="title" style="color:var(--red)">已停止：环境问题</div><div class="sub" style="color:var(--dim)">${esc(ev.hint || "")}</div><div class="sub" style="color:var(--dim)">${esc(ev.error || "")}</div>`;
+  } else if (ev.type === "checkpoint.request") {
+    div.innerHTML = t + `<div class="title" style="color:var(--amber)">⏸ 等你确认（还没花钱）</div>
+      <div class="sub">${actName}${ev.prompt ? "：" + esc(ev.prompt) : ""}</div>
+      <div class="ckRow" style="display:flex;gap:8px;margin-top:8px">
+        <button style="background:var(--green);color:#04231b;border:none;border-radius:8px;padding:5px 14px;font-size:13px;font-weight:600;cursor:pointer">批准</button>
+        <button style="background:none;border:1px solid var(--red);color:var(--red);border-radius:8px;padding:5px 14px;font-size:13px;cursor:pointer">拒绝</button>
+      </div><div class="ckNote"></div>`;
+    const btns = div.querySelectorAll(".ckRow button");
+    btns[0].onclick = () => sendApprove(ev, true, div);
+    btns[1].onclick = () => sendApprove(ev, false, div);
+  } else if (ev.type === "checkpoint") {
+    div.innerHTML = t + `<div class="title" style="color:${ev.approved ? "var(--green)" : "var(--red)"}">${ev.approved ? "✅ 人工已批准，继续开工" : "⛔ 人工拒绝，跳过（未产生费用）"}</div><div class="sub" style="color:var(--dim)">${esc(ev.note || "")}</div>`;
   } else if (ev.type === "critic") {
     const layers = (ev.layers || []).map(l =>
       `<span class="layer">${l.layer.split("_")[0]}</span><span class="bar"><i style="width:${Math.round(l.score * 100)}%;background:${layerColor(l.score)}"></i></span>`).join("");
@@ -767,6 +796,9 @@ async function replay(runId) {
       else if (ev.type === "task.start") html = t + `<div class="title"><span class="act ${ev.kind === "retry" ? "retry" : ""}">${actName}</span></div>`;
       else if (ev.type === "infra.retry") html = t + `<div class="title" style="color:var(--amber)">服务繁忙，重试 ${ev.attempt}/4</div>`;
       else if (ev.type === "infra.abort") html = t + `<div class="title" style="color:var(--red)">已停止：环境问题</div><div class="sub" style="color:var(--dim)">${esc(ev.hint || "")}</div>`;
+      // 回放是历史：不渲染可点击的审批按钮（那个动作早就决议完了，点了只会得到"没有待审批项"）
+      else if (ev.type === "checkpoint.request") html = t + `<div class="title" style="color:var(--amber)">⏸ 曾等待人工确认</div>`;
+      else if (ev.type === "checkpoint") html = t + `<div class="title" style="color:${ev.approved ? "var(--green)" : "var(--red)"}">${ev.approved ? "✅ 人工批准" : "⛔ 人工拒绝"}</div>`;
       else if (ev.type === "critic") html = t + `<div class="title">评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div><div>${(ev.failures || []).map(f => `<span class="pill red">${zh(FAILURES, f)}</span>`).join("")}</div>`;
       else if (ev.type === "decision") html = t + `<div class="title">${ev.decision === "PASS" ? "✅ 通过" : ev.decision === "RETRY" ? "🔧 重试" : "❌ 失败"}</div>`;
       else if (ev.type === "run.done") { done = ev; html = t + `<div class="title">完成</div><div class="sub" style="color:var(--dim)">${ev.completed.length} 项完成 · ${ev.attempts} 次尝试</div>`; }

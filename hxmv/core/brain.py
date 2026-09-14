@@ -21,14 +21,73 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field, asdict
+
+try:                       # POSIX
+    import fcntl
+except ImportError:        # Windows
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 BRAIN_PATH = os.environ.get("HXMV_BRAIN", os.path.expanduser("~/.hxmv/brain.json"))
 DEFAULT_CHAR_BUDGET = int(os.environ.get("HXMV_MEMORY_CHARS", "8000"))  # 注入预算(字符)
 MAX_ENTRIES = 5000          # 软上限：大但理智
 DECAY_DAYS = 60             # 超过此天数未命中的 importance 打折
 DECAY_FACTOR = 0.7
+
+
+class _FileLock:
+    """跨进程文件锁（POSIX `fcntl` / Windows `msvcrt` 双实现，零第三方依赖）。
+
+    为什么必须有：Brain 是**单文件**状态。Web 面板的串行 worker 只保证
+    "同一进程内不打架"，挡不住另一个进程——CLI 跑一次的同时手机在面板上又跑一次，
+    两边各自 read-modify-write，后写的会把先写的经验整段抹掉（静默丢数据，最难查）。
+
+    拿不到锁时不罢工（继续跑）：宁可偶尔有一次写竞争，也不要让整个闭环卡死。
+    """
+
+    def __init__(self, path: str):
+        self.lock_path = path + ".lock"
+        self._fh = None
+
+    def __enter__(self) -> "_FileLock":
+        directory = os.path.dirname(self.lock_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self._fh = open(self.lock_path, "a+", encoding="utf-8")
+        try:
+            if fcntl is not None:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                # msvcrt 只能锁"从当前位置开始的一段字节"，先保证文件非空再锁第 1 字节
+                if os.path.getsize(self.lock_path) == 0:
+                    self._fh.write("l")
+                    self._fh.flush()
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError:
+            pass
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._fh is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        finally:
+            self._fh.close()
+            self._fh = None
 
 
 def _now() -> float:
@@ -82,14 +141,41 @@ class Brain:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             self.entries = [Entry(**e) for e in data.get("entries", [])]
-        except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        except FileNotFoundError:
             self.entries = []
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            # 记忆损坏时**先留证据再清空**：直接清空等于把用户攒下的经验无声删掉，
+            # 而"为什么坏了"永远查不出来（也可能是上一版写到一半被杀进程）。
+            self.entries = []
+            try:
+                backup = f"{self.path}.corrupt-{int(time.time())}"
+                os.replace(self.path, backup)
+                print(f"  ⚠ 大脑文件损坏（{e}）→ 已备份为 {os.path.basename(backup)}，从空记忆继续")
+            except OSError:
+                pass
 
     def save(self) -> None:
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"entries": [asdict(e) for e in self.entries]},
-                      f, ensure_ascii=False, indent=1)
+        directory = os.path.dirname(self.path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with _FileLock(self.path):
+            # 原子替换：先写同目录临时文件，再 os.replace 顶上去。
+            # 直接 open(path, "w") 的写法有个致命窗口——写到一半进程被杀（Ctrl+C、
+            # 面板重启、手机被系统杀）就留下半个 JSON，下次启动只能整段丢记忆。
+            fd, tmp = tempfile.mkstemp(dir=directory or ".", prefix=".brain-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump({"entries": [asdict(e) for e in self.entries]},
+                              f, ensure_ascii=False, indent=1)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self.path)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
 
     # ---------- 写入 ----------
     def remember(self, content: str, kind: str = "FACT",
