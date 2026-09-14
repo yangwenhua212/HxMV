@@ -180,7 +180,7 @@ class RunManager:
                                        os.path.join(RUNS_DIR, run_id, "artifacts"),
                                        base=base, run_id=run_id)
         payload["project"] = job.get("project") or None
-        payload["provider"] = job.get("provider") or "mock"
+        payload["provider"] = job.get("provider") or "auto（按已配置的 Key 自动选真视频档）"
         rec.emit({"type": "notify", "result": _notify.notify(payload)})
 
 
@@ -872,10 +872,14 @@ class Handler(BaseHTTPRequestHandler):
         if not goal:
             self._send_err(400, "goal 不能为空")
             return
-        provider = PROVIDERS.get(str(body.get("provider", "mock")), "")
+        # 「没传 provider」和「显式要 mock」必须区分开：
+        # 不传 = 交给内核自动选（有真 Key 就用真视频，别默默给假视频）；
+        # 显式传 mock = 真的要模拟世界（离线/demo）。
+        raw_provider = str(body.get("provider") or "").strip().lower()
+        provider = "mock" if raw_provider == "mock" else PROVIDERS.get(raw_provider, "")
         project = str(body.get("project", "")).strip()
         run_id = MANAGER.submit(goal, provider, project)
-        self._send_json({"run_id": run_id, "provider": provider or "mock",
+        self._send_json({"run_id": run_id, "provider": provider or "auto",
                          "project": project or None}, 202)
 
 

@@ -38,6 +38,9 @@ COST_UNITS = {"cogvideox-flash": 0.0, "cogvideox-3": 1.05, "cogvideox-2": 0.7}  
 # 各档位真实能给的时长（秒）：flash 只出 5 秒档；`_submit` 里 >7 才会要 10 秒档。
 # 声明出来是为了让执行器"要不到就别要"，否则闭环会一直撞 too_short（实测撞了 4 轮）。
 MAX_DURATION = {"cogvideox-flash": 5.0, "cogvideox-3": 10.0, "cogvideox-2": 10.0}
+# 资产出图模型（角色设定表 / 场景定帧）：cogview-3-flash 免费；可换 cogview-4（按次计费）
+IMAGE_MODEL = os.environ.get("HXMV_ZHIPU_IMAGE_MODEL", "cogview-3-flash")
+IMAGE_COST = {"cogview-3-flash": 0.0, "cogview-4": 0.06, "cogview-4-250304": 0.06}
 
 
 def _data_url(path: str) -> str:
@@ -136,6 +139,114 @@ class ZhipuVideoProvider(VideoProvider):
             raise ProviderError(f"{what}返回非 JSON: {e}", retryable=True)
 
     # ---------- 任务 ----------
+    # ---------- 资产图：角色设定表 / 场景定帧（真 AI 出图）----------
+    @staticmethod
+    def _describe(desc: str, kind: str) -> str:
+        """把「目标」变成**具体的视觉描述**再喂出图模型。
+
+        实测踩过：直接把整句目标（「小石猴在花果山翻跟头，两个镜头，一个远景一个近景」）
+        当描述交给出图模型，它会给你一张**金发男孩**设定表和一张**通用山景** ——
+        因为那句话根本不是画面描述。所以先用文本模型写一段具体描述。
+        没有可用的 LLM 时原样返回（宁可用粗描述，也不假装）。
+        """
+        text = (desc or "").strip()
+        if not text:
+            return text
+        try:
+            from ..core import llm
+            if not llm.llm_available():
+                return text
+            if kind == "character":
+                system = ("你在做美术设定。把用户的内容目标提炼成**一个角色**的具体外形描述："
+                          "物种/体型/年龄感/毛色或配色/服饰/标志性特征，60 字以内。"
+                          "只写外形，不要动作、不要剧情、不要分镜、不要镜头。直接给描述。")
+            else:
+                system = ("你在做美术设定。把用户的内容目标提炼成**一个场景**的具体描述："
+                          "地点/地形/环境元素/光线/氛围，60 字以内。只写场景本身，"
+                          "不要角色、不要剧情、不要分镜。直接给描述。")
+            out = llm.chat([{"role": "system", "content": system},
+                            {"role": "user", "content": text}],
+                           temperature=0.4, max_tokens=200).strip()
+            return out or text
+        except Exception:
+            return text
+
+    def _asset_prompt(self, task, kind: str) -> str:
+        """设定表 / 定帧的提示词。
+
+        角色为什么给「设定表」而不是单张图：标杆就是三视图 + 表情 + 动作那类设定表，
+        单张图锁不住设计（换个角度就变样）。设定表是**设计基准**，
+        所以它不当首帧用（网格画面喂给视频模型，片子里就会真的出现格子）。
+        """
+        desc = self._describe(str(task.input.get("prompt") or "").strip(), kind)
+        style = str(task.constraints.get("style") or "cinematic, film-like color").strip()
+        if kind == "character":
+            return (
+                "A clean character design sheet (character reference sheet) on a plain light background, "
+                f"art style: {style}. "
+                "(1) Three full-body turnaround views of the SAME character: front view, side view, back view — "
+                "identical proportions, identical design, consistent colors. "
+                "(2) Six head-only expression studies: happy, surprised, angry, sad, laughing, curious. "
+                "(3) Three action poses: running, jumping, sitting. "
+                f"Character description: {desc}. "
+                "Neat grid layout, illustration finish, no text, no watermark, no labels."
+            )
+        return (
+            "A cinematic wide keyframe (the first frame of a video shot), 16:9 composition, "
+            f"art style: {style}. Scene: {desc}. "
+            "Natural lighting, film-like color grading, high detail, no text, no watermark."
+        )
+
+    def _generate_asset(self, task) -> dict:
+        """用 CogView 出资产图（角色设定表 / 场景定帧）。出图失败退回本地资产，但把原因标出来。"""
+        from ..core.project import fingerprint
+
+        kind = "character" if task.action == "GENERATE_CHARACTER" else "scene"
+        key = str(task.constraints.get("asset_key") or task.constraints.get("scene_key") or task.task_id)
+        prompt = self._asset_prompt(task, kind)
+        fp = fingerprint({"prompt": f"asset|{kind}|{key}|{prompt}", "model": IMAGE_MODEL})
+        if self.project:
+            hit = self.project.shot(fp)
+            if hit:
+                saved = dict(hit["result"])
+                saved.update({"reused": True, "fingerprint": fp, "cost_units": 0.0})
+                return saved
+
+        size = "1344x768" if kind == "scene" else "1024x1024"
+        resp = None
+        try:
+            resp = self._post("images/generations",
+                              {"model": IMAGE_MODEL, "prompt": prompt, "size": size})
+        except ProviderError as e:
+            print(f"⚠ 出图失败（{e}）→ 退回本地资产")
+        url = ((resp.get("data") or [{}])[0] or {}).get("url") if resp else None
+        if not url:
+            out = self._local.generate(task)
+            out["image_failed"] = True
+            return out
+
+        path = os.path.join(self.outdir, f"{kind}_{task.task_id}.png")
+        self._download(url, path)
+        result = {
+            "asset": path, "asset_key": key, "kind": kind,
+            "sheet": kind == "character",          # 设定表：设计基准，不当首帧
+            "prompt": prompt, "image_model": IMAGE_MODEL,
+            "fingerprint": fp, "cost_units": IMAGE_COST.get(IMAGE_MODEL, 0.0),
+        }
+        if self.project:
+            # 登记进项目档案（下游镜头会拿它当参考）。
+            # sheet=True：角色设定表是**设计基准**，不是一帧画面 —— 下游据此跳过它、
+            # 别把三视图网格喂给视频模型当首帧。
+            self.project.register_asset(
+                kind, key, path, name=key,
+                style=self.project.style,
+                sheet=(kind == "character"),
+                image_model=IMAGE_MODEL,
+            )
+            self.project.register_shot(fp, path, episode=self.episode,
+                                       result={k: v for k, v in result.items() if k != "cost_units"})
+        return result
+
     def _submit(self, task, prompt: str, image: str | None) -> dict:
         size = SIZE_MAP.get(str(task.input.get("resolution") or ""), "1920x1080")
         duration = int(task.input.get("duration") or 5)
@@ -210,8 +321,13 @@ class ZhipuVideoProvider(VideoProvider):
 
     # ---------- 入口 ----------
     def generate(self, task) -> dict:
-        if task.action in ("GENERATE_CHARACTER", "GENERATE_SCENE", "STORYBOARD", "COMPOSE"):
-            return self._local.generate(task)      # 资产图/分镜/成片：复用本地实现
+        # 角色设定表 / 场景定帧：**真 AI 出图**（原来一律甩给本地 FFmpeg 出占位色卡，
+        # 色卡又不能当首帧 → 角色一致性从头到尾没有抓手，大脑里 18 条
+        # character_inconsistency 修不掉就是这个原因）。
+        if task.action in ("GENERATE_CHARACTER", "GENERATE_SCENE"):
+            return self._generate_asset(task)
+        if task.action in ("STORYBOARD", "COMPOSE"):
+            return self._local.generate(task)      # 分镜/成片：复用本地实现
 
         # 复用在最前面：档案里已有这个画面 → 一张都不重新生成（也不消耗额度）
         from ..core.project import fingerprint, fp_params
@@ -233,7 +349,9 @@ class ZhipuVideoProvider(VideoProvider):
                     continue
                 hit = self.project.asset(kind, str(key))
                 if hit:
-                    if hit.get("placeholder"):
+                    if hit.get("placeholder") or hit.get("sheet"):
+                        # 占位色卡 / 角色设定表（三视图网格）都不能当首帧：
+                        # 色卡等于让模型照色卡发挥；设定表会把格子画进片子里。
                         # 占位素材（系统造的色卡，不是用户传的参考图）→ **不要当首帧发给模型**：
                         # 实测喂色卡等于让模型照色卡发挥，还不如纯文字生成。再看另一类有没有真图。
                         continue
