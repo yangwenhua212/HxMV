@@ -2,7 +2,7 @@
   "provider": "mock",
   "planner": "mock",
   "goals": 8,
-  "projects_dir": "/home/admin/.hxmv/bench/projects",
+  "projects_dir": "~/.hxmv/bench/projects",
   "rounds": [
     {
       "goals": 8,

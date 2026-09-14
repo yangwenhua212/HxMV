@@ -19,3 +19,27 @@ venv/
 output/
 *.mp4
 *.tmp
+
+# 运行时数据与凭据
+# 默认都在 ~/.hxmv/ 下，但这些环境变量可以把它指到当前目录来：
+#   HXMV_BRAIN（大脑记忆）/ HXMV_PROJECTS（项目档案）/ HXMV_ARTIFACTS（产物）
+#   HXMV_PANEL_ENV（**访问令牌**）/ 模型 Key 写在 config.json
+# 一旦落在仓库目录里又没被忽略，开源时就会把记忆、个人目录结构甚至面板令牌一起公开。
+brain.json
+project.json
+config.json
+panel.env
+runs/
+artifacts/
+hooks/
+dl/
+refs/
+*.jsonl
+# 原子写留下的临时文件（写一半被杀进程时残留）
+.brain-*.tmp
+.project-*.tmp
+
+# 工具缓存
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/

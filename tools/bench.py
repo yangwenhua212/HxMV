@@ -28,6 +28,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH_DIR = os.path.join(os.path.expanduser("~/.hxmv"), "bench")
 
 
+def _tildify(path: str) -> str:
+    """把 home 前缀换成 `~`。
+
+    基准结果是要**进仓库**的（`docs/bench_results.json`），写绝对路径等于把跑分机器的
+    home 路径一起公开（实测踩过：结果文件里就留着这样一条，开源后谁都能看到用户名）。
+    """
+    home = os.path.expanduser("~")
+    p = str(path)
+    return "~" + p[len(home):] if home and p.startswith(home) else p
+
+
 def _prepare_env(provider: str, brain_path: str, projects_dir: str) -> None:
     """必须在 import hxmv 之前设好：这几个路径是在模块导入时读的。"""
     os.environ["HXMV_BRAIN"] = brain_path
@@ -283,7 +294,7 @@ def main() -> int:
               f"{s['seconds']}s ｜ 大脑 {brain.stats()}")
 
     results = {"provider": args.provider, "planner": "mock", "goals": len(goals),
-               "projects_dir": PROJECTS_DIR, "rounds": rounds}
+               "projects_dir": _tildify(PROJECTS_DIR), "rounds": rounds}
     os.makedirs(os.path.dirname(os.path.abspath(args.json)), exist_ok=True)
     with open(args.json, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
