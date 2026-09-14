@@ -1,0 +1,63 @@
+name: CI
+
+# 为什么要有它：项目里那些"实测踩过"的经验，绝大多数只能靠"再跑一次"发现回退。
+# 之前没有任何自动化，改一处参数可能悄悄破坏指纹/判据/路由而无人察觉。
+# 这个流水线只做三件事，但每一件都在守一条真实踩过的坑。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 单测 + Mock 闭环（Py${{ matrix.python-version }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 是项目声明的最低版本；3.12/3.13 覆盖新语法与弃用告警
+        python-version: ["3.10", "3.12", "3.13"]
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装 ffmpeg 与字体
+        # 真测量路径（ffprobe/blackdetect/blurdetect/scdet）需要 ffmpeg；
+        # fonts-dejavu-core 是给 drawtext 用的——缺字体会让 local 渲染整条链失败，
+        # 而这正是我们在 Windows 上踩过的那个坑，CI 里不能再踩一次。
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: 语法检查（全部模块可编译）
+        # 挡住"某个平台专属语法/缩进错误只在特定分支才暴露"这类低级回归
+        run: python -m compileall -q hxmv tools tests mcp_server.py
+
+      - name: 单元测试
+        # 守住三条不变量：指纹白名单全覆盖、Critic 建议可被 Refiner 执行、provider 路由不退化
+        run: python -m unittest discover -s tests -v
+
+      - name: 端到端冒烟（Mock 世界，零 Key 零依赖）
+        # README 第一条示例命令必须真的能跑通——它是新用户的第一印象
+        run: |
+          python -m hxmv --provider mock --fresh --brain /tmp/ci_brain.json \
+            "一只小猫在花园里追蝴蝶，5 秒钟"
+
+      - name: 部署自检（硬项不得失败）
+        # doctor 必须如实报绿：它说"可以跑"就得真能跑
+        run: python -m hxmv --doctor
+
+      - name: 真渲染冒烟（local provider，ffmpeg 真出片）
+        # 唯一能验证 drawtext/fontfile 与真测量闭环的路；只在 3.12 上跑一次，省 CI 时间
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m hxmv --provider local --fresh --brain /tmp/ci_local_brain.json \
+            --out /tmp/ci_film "雪地里的柯基在打滚，5 秒短片"
+          ls -la /tmp/ci_film/*.mp4

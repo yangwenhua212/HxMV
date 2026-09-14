@@ -48,7 +48,11 @@ class QualityReport:
         tail = f" · {self.detail}" if self.detail else ""
         if self.passed:
             return f"[{self.layer}] ✓ 通过 (score={self.score:.2f}){tail}"
+        # 截断必须显式标注：原来只切 [:3] 不给省略号，看起来像"只有这三个缺陷"，
+        # 实际第 4 项（如 multi_shot）被判了却没显示——调试时会误判成判据没生效。
+        fails = self.failures[:3] + (["…"] if len(self.failures) > 3 else [])
+        sugg = self.suggestions[:2] + (["…"] if len(self.suggestions) > 2 else [])
         return (
             f"[{self.layer}] ✗ 失败 score={self.score:.2f} "
-            f"failures={self.failures[:3]} → {self.suggestions[:2]}{tail}"
+            f"failures={fails} → {sugg}{tail}"
         )

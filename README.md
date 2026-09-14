@@ -47,7 +47,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/critic.py` | **三层 Critic**：L1 物理（ffmpeg 实测）/ L2 视觉（抽帧 + 视觉模型判身份）/ L3 语义（抽帧 + 视觉模型判分镜），合并为 QualityReport |
 | `media/sheet.py` | **设定表 → 首帧**：自动把角色设定表裁成 16:9 主视觉（`crop_box` 纯函数可单测；PIL 优先，退 ffmpeg）；CLI `--set-ref` 与面板「参考图」卡片共用 |
 | `tools/bench.py` | **基准集跑分（第三刀）**：固定目标 × 多轮，每轮换新项目、共享大脑 → 输出 `docs/BENCH.md` 曲线（首轮通过率 / 平均尝试 / 成本）|
-| `media/probe.py` | **真眼睛（v0.4）**：ffprobe/ffmpeg 从**真实媒体**里量出分辨率/帧率/时长/音量/黑帧/静止/外观一致度 |
+| `media/probe.py` | **真眼睛（v0.4）**：ffprobe/ffmpeg 从**真实媒体**里量出分辨率/帧率/时长/音量/黑帧/静止/外观一致度；**v0.8 扩展**：`blurdetect` 量真模糊、`scdet` 量镜头切换、`loudnorm` 量 EBU R128 响度、`silencedetect` 抓"有音轨但全程静音"（全部零新依赖） |
 | `core/refiner.py` | 按 failures→suggestions 调参重投；**优先查质量记忆里的历史成功修正** |
 | `core/controller.py` | 判定 PASS/RETRY/FAIL；PASS 时把验证有效的修正回写质量记忆 |
 | `core/brain.py` | **大脑**：持久记忆，自动注入/自动回写，会遗忘（详见下） |
@@ -56,7 +56,9 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `providers/zhipu_video.py` | **真 AI 视频（v0.6）**：智谱 CogVideoX-Flash（免费）文/图生视频。**一张首帧只能锁一类**：默认锁角色（`cons.ref_use="scene"` 可改成锁场景），另一类靠提示词里写明（场景锁/角色锁）——不写清楚，模型会把参考图的背景一起搬过来（实测：给草地上的柯基照片 → 出来还是草地，要的雪地没出现） |
 | `core/config.py` | 本地凭据：`~/.hxmv/config.json`（权限 600），`--set-key` 一次配好，CLI 与 Web 共用 |
 | `providers/` | Provider 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
-| `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板（生产页 / **设置页**：接口配置与模型档位） |
+| `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板（生产页 / **设置页**：接口配置与模型档位）；面板里可直接**点批准/拒绝**人工审批点 |
+| `core/loop.py` | **闭环主体** + 两道护栏：**人工审批点**（`approve` 回调，付费/高危动作开工前先问，拒绝不产生任何费用）+ **基础设施熔断**（同一错误连倒 3 个任务即停，无效重试 20 次→6 次） |
+| `tests/` | **单元测试（39 例，纯标准库）**：守住"指纹白名单全覆盖""Critic 建议必须可被 Refiner 执行""provider 路由不退化"等踩过的坑 |
 
 ### v0.4「真产物 + 真眼睛」：哪部分是真的
 
@@ -126,6 +128,13 @@ python3 -m hxmv --provider local --out /tmp/film "指定产物目录"
 python3 -m hxmv --fresh --provider local "同一个目标"
 python3 -m hxmv --brain /path/brain.json "..."
 
+# 人工审批点：付费/高危动作**开工前**先问一次（拒绝 → 不执行、不产生费用）
+python3 -m hxmv --provider zhipu --approve paid "第1集：柯基在雪地里打滚"   # 只问计费动作
+python3 -m hxmv --provider local --approve each "冷启动全流程演示"          # 每个动作都问
+
+# 跑测试（纯标准库，零安装；含真 ffmpeg 的集成用例，没装 ffmpeg 会自动跳过）
+python3 -m unittest discover -s tests -v
+
 # 开一部"片子"并续做（项目档案：记住风格/角色，续做不重画已有画面）
 python3 -m hxmv --provider local --project 柯基短剧 --episode 1 --style cinematic \
     "第1集：柯基在雪地里打滚"
@@ -181,6 +190,7 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - 完成后的**真实产物可直接在面板点开播放/下载**（`GET /api/artifact?run_id=…&name=…`）
 - 侧栏实时显示大脑沉淀（LESSON 升华），底部历史 run 点击即回放
 - 事件存档：`~/.hxmv/runs/<id>/events.jsonl`（可审计、可回放）
+- **人工审批点**（`HXMV_APPROVE=each|paid`）：闭环停在"马上要花钱"的那一刻，面板直接弹**批准/拒绝**按钮；没人点（超时默认 300s）或面板关了 → 按**拒绝**处理（宁可不做，也不默默花钱）
 - 公网：设 `HXMV_WEB_TOKEN` 后所有 `/api/*` 需 token（header 或 `?token=`），面板 URL 带一次即记住
 - **参考图卡片**：填项目名 → 选**角色/场景** → 选图片 → **预览**（自动把设定表裁成 16:9 主视觉）→ 存为参考图。镜头就会从这张图开始动，不用碰命令行
 - **首帧只锁一类**：角色图当首帧（默认）→ 提示词额外写明「这张图只定角色长相，背景别抄它」；场景图当首帧（`ref_use="scene"`）→ 反过来锁角色。**首帧那张图实际是哪一类会进画面指纹**，所以切换不会复用错文件
@@ -220,6 +230,8 @@ hermes mcp add hxmv --command /你的路径/hxmv/start_mcp.sh
 - **路径穿越**：`run_id` / 产物名一律白名单校验（`YYYYMMDD-HHMMSS-xxxx`），`/api/artifact`、`/api/run/<id>/files`、`/api/ref/image` 都已挡住（实测 400/404，不会吐出 `panel.env` 这类文件）。
 - **令牌别进日志**：面板 URL 可能带 `?token=` 或 `/k/<令牌>`，默认日志格式会把整条 URI 原样写进 `access.log`／journal —— 令牌就明文躺着了。反代请用 `deploy/nginx-mask.conf`（`map` + 自定义 `log_format`）脱敏，历史上已经落下的要一并清掉。
 - **当成 Agent 工具用（MCP）**：`hxmv_make` 对付费档**默认拒绝**（必须显式 `allow_paid=true`），且有每日上限 `HXMV_MAX_PAID_PER_DAY`（默认 5）；每次开工/删片写 `~/.hxmv/mcp_audit.log` —— 防的是提示注入 / 循环调用烧钱。
+- **人工审批点**（`HXMV_APPROVE=each|paid`）：付费动作开工前必须有人点"批准"，**超时按拒绝**（`HXMV_APPROVE_TIMEOUT` 默认 300s）。这是"人在回路"的硬闸门——钱在动作执行前就被拦下，不是事后结算才发现。
+- **令牌比较用常量时间**（`secrets.compare_digest`）：避免 `==` 的短路比较通过计时差异逐字节猜令牌。
 - **凭据**：`~/.hxmv/panel.env`（令牌）、`~/.hxmv/config.json`（模型 Key）权限 600，且都不进 git。
 
 ## 路线
@@ -234,7 +246,8 @@ hermes mcp add hxmv --command /你的路径/hxmv/start_mcp.sh
 - **V0.7** ✅ 真视觉闭环 + 两个入口 + 跑分：L2/L3 抽帧喂视觉模型（真看图）、面板/CLI **上传参考图**、**基准集跑分曲线**（`tools/bench.py` → `docs/BENCH.md`）
 - **V0.7** ✅ 语义修正真落地（四条守卫真改提示词）+ 场景锁/角色锁（首帧只锁一类）
 - **V0.7** 🚧 **真视觉闭环 ✅**（L2 抽帧身份判定 + L3 抽帧语义评审，配 `HXMV_VLM_MODEL` 生效；未配则如实标注未做视觉检查）；资产一致性深化（参考图版本管理、跨镜头锁脸）、checkpoint 人工审批点 📋
-- **V0.8** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
+- **V0.8** ✅ 判据扩容 + 工程化：`blurdetect` 真模糊（与"分辨率不足"分开判、分开修）、`scdet` 镜头切换（单镜头任务不许模型自己剪片）、`loudnorm`/`silencedetect` 抓"有音轨但全程静音"；**人工审批点**（人在回路的付费闸门）；基础设施熔断；三层评审并行 + 单层异常隔离；Brain 原子写与跨进程锁；CI + 单元测试
+- **V0.9** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核
 
 ## 设计文档
 

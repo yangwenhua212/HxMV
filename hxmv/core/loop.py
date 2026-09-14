@@ -136,7 +136,8 @@ def run(goal: str,
         project=None,
         episode: int | None = None,
         verbose: bool = True,
-        emit=None) -> ExecutionState:
+        emit=None,
+        approve=None) -> ExecutionState:
     """跑一个目标到完成，返回最终 ExecutionState（可继续检视/续跑）。
 
     brain：持久记忆（"大脑"）。不传则自动加载 ~/.hxmv/brain.json。
@@ -147,6 +148,11 @@ def run(goal: str,
       - 跑完把本次记成新的一集（episode 可指定集号）
     emit：可选事件回调 emit(dict)——每个关键节点收到一个 JSON 可序列化事件。
     事件订阅者抛异常不影响闭环（观察层永远不打断生产）。
+    approve：可选人工审批点（checkpoint）。签名 `approve(task) -> bool | None`：
+      - `None` = 这个动作不需要审批 → 直接开工（调用方决定策略：只审付费档、审全部…）
+      - `True` = 已获批准 → 正常执行
+      - `False` = 被拒绝 → 该任务判 FAIL 并跳过，**不消耗生成预算**
+    策略放在回调里，闭环本身不认识"付费""高危"这些业务概念——边界不越。
     """
     def _emit(event: dict) -> None:
         if emit is not None:
@@ -199,6 +205,29 @@ def run(goal: str,
         brief = _task_brief(task)
         _emit({"type": "task.start", **brief,
                "kind": "retry" if task.retry_policy.get("attempts") else "new"})
+
+        # 1.5) 人工审批点（checkpoint）：付费/高危动作**开工前**问一次。
+        #      必须在执行之前：被拒绝时一个字节都不会发出去，也不会产生任何费用
+        #      （事后审批只能补救，钱已经花了）。策略由 approve 回调决定，闭环不认识业务概念。
+        if approve is not None:
+            verdict = None
+            try:
+                verdict = approve(task)
+            except Exception as e:      # 审批通道故障不能打断生产——按"无需审批"放行
+                state.log(f"⚠ 审批回调异常（按放行处理）: {e}")
+            if verdict is False:
+                task.status = TaskStatus.FAIL
+                state.failed.append(task)
+                state.observations.append(
+                    {"task_id": task.task_id, "report": None,
+                     "note": f"{task.action} 被人工拒绝"})
+                state.log(f"⛔ {task.action} {task.task_id} 未获批准，跳过（未产生费用）")
+                _emit({"type": "checkpoint", "task_id": task.task_id, "action": task.action,
+                       "approved": False, "note": "人工拒绝"})
+                continue
+            if verdict is True:
+                _emit({"type": "checkpoint", "task_id": task.task_id, "action": task.action,
+                       "approved": True, "note": "人工批准"})
 
         # 2) 执行：基础设施错误（ProviderError）按"服务重试"处理，
         #    与质量 FAIL 分道——不消耗 Refiner 的重试额度

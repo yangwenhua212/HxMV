@@ -26,6 +26,39 @@ from .core.brain import Brain
 from .core.loop import run
 
 
+def _make_approver(policy: str, executor):
+    """构造人工审批回调（返回 None = 不启用审批点）。
+
+    策略只在这里落地：**闭环本身不认识"付费/高危"这些业务概念**，
+    它只知道"回调说要问、回调说批不批"——边界不越，换策略不用改内核。
+    """
+    if policy == "none":
+        return None
+    provider = getattr(executor, "provider", None)
+
+    def _costs_money(action: str) -> bool:
+        try:
+            return float(provider.estimate_cost(action)) > 0
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def approve(task) -> bool | None:
+        if policy == "paid" and not _costs_money(task.action):
+            return None                       # 免费档（local/mock/zhipu 免费模型）不打扰
+        prompt = str(task.input.get("prompt") or task.input.get("goal") or "")[:40]
+        try:
+            answer = input(f"\n⏸ 审批点：{task.action} {task.task_id}（{prompt}）\n"
+                           f"   批准执行？[y/N] ").strip().lower()
+        except EOFError:
+            # 非交互环境（cron / 管道 / 被重定向）→ 默认拒绝。
+            # 安全优先：没人看着的时候，不该替人决定"要不要花钱"。
+            print("   （无交互终端 → 默认拒绝）")
+            return False
+        return answer in ("y", "yes")
+
+    return approve
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="hxmv", description="HxMV 自主内容生产闭环")
     ap.add_argument("goal", nargs="*", help="内容生产目标（缺省用示例）")
@@ -43,6 +76,11 @@ def main() -> int:
     ap.add_argument("--doctor", action="store_true",
                     help="部署自检：Python/ffmpeg/编码器/Key/目录/端口，缺什么给什么修复命令")
     ap.add_argument("--out", default=None, help="产物目录（local provider 用，默认 ~/.hxmv/artifacts/<时间戳>）")
+    ap.add_argument("--approve", default="none", choices=("none", "each", "paid"),
+                    help="人工审批点（checkpoint）：none=不审批（默认）；"
+                         "each=每个生成动作开工前等你确认；"
+                         "paid=只对**计费**的动作确认（免费档不打扰）。"
+                         "拒绝的动作不执行、不产生费用")
     ap.add_argument("--project", default=None, help="项目名：跨 run 记住风格/角色/已生成画面，续做时不重新生成")
     ap.add_argument("--episode", type=int, default=None, help="第几集（默认自动递增）")
     ap.add_argument("--style", default=None, help="项目风格（首次创建项目时用，默认 cinematic）")
@@ -172,8 +210,18 @@ def main() -> int:
         if event.get("type") == "run.done":
             done.update(event)
 
+    # 人工审批点要在执行**之前**生效，所以 executor 得先建好（审批策略要问它"这个动作花不花钱"）。
+    # 传给 run() 复用同一个实例，避免"审批看的是一个 provider、实际跑的是另一个"。
+    from .core.executor import make_executor
+    executor = make_executor(project=project, episode=args.episode)
+    approver = _make_approver(args.approve, executor)
+    if approver is not None:
+        print(f"  ⏸ 人工审批点已开启（--approve {args.approve}）："
+              f"被拒绝的动作不执行、不产生费用")
+
     try:
-        run(goal, brain=brain, project=project, episode=args.episode, emit=_capture)
+        run(goal, brain=brain, project=project, episode=args.episode, emit=_capture,
+            executor=executor, approve=approver)
     except KeyboardInterrupt:
         print("\n⏹ 已手动停止（大脑已保存）")
         return 130

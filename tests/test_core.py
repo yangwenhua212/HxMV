@@ -12,7 +12,10 @@
     python tests/test_core.py            # 也可以直接跑
 """
 import os
+import shutil
 import sys
+import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,6 +27,8 @@ from hxmv.core.executor import MockVideoExecutor, make_executor
 from hxmv.core.project import _FP_KEYS, fingerprint, fp_params
 from hxmv.core.refiner import _ADJUST, _HUMAN_HINT, _apply
 from hxmv.core.state import Task
+from hxmv.media import probe
+from hxmv.media.probe import THRESHOLDS, detect_defects
 from hxmv.media.sheet import crop_box
 
 
@@ -196,6 +201,158 @@ class ProviderRoutingTest(unittest.TestCase):
     def test_unspecified_env_still_reaches_a_provider(self):
         # 空/未设置 ≠ 无声降级；必须真的选到一个 provider
         self.assertNotEqual(exec_mod._auto_provider(), "")
+
+
+# ------------------------------------------------- L1 扩展判据（v0.8 新增）
+class DetectDefectsTest(unittest.TestCase):
+    """守住 v0.8 用 ffmpeg 直接量出来的三类判据，以及一条关键的区分：
+    **没测量 ≠ 测出来是静音**——老 run 记录里没有 lufs 键，不能被判成 silent_audio。
+    """
+
+    def _base(self, **extra) -> dict:
+        m = {"width": 1280, "height": 720, "fps": 30, "duration": 5.0,
+             "blur_mean": 5.1, "blur_max": 5.4, "scene_cuts": 0, "has_audio": False}
+        m.update(extra)
+        return m
+
+    def test_clean_metrics_produce_no_defects(self):
+        self.assertEqual(detect_defects(self._base()), [])
+
+    def test_blurry_is_separate_from_low_clarity(self):
+        """模糊与分辨率不足是两种病：修正方向不同（改提示词 vs 升分辨率），不能混。"""
+        m = self._base(blur_mean=20.0, blur_max=25.0)
+        self.assertIn("blurry", detect_defects(m))
+        self.assertNotIn("low_clarity", detect_defects(m))
+
+    def test_unmeasurable_blur_counts_as_blurry(self):
+        # blurdetect 对极模糊输出 nan → 解析成 blur_unmeasurable，不能当成"没测到"
+        m = self._base(blur_mean=None, blur_max=THRESHOLDS["blur_unmeasurable"])
+        self.assertIn("blurry", detect_defects(m))
+
+    def test_scene_cuts_flagged_only_for_single_shot_tasks(self):
+        """成片（COMPOSE）本来就是多镜头拼的，判它 multi_shot 等于把每部成片都判死。"""
+        m = self._base(scene_cuts=2)
+        self.assertIn("multi_shot", detect_defects(m, expect_single_shot=True))
+        self.assertNotIn("multi_shot", detect_defects(m, expect_single_shot=False))
+
+    def test_silence_only_judged_when_audio_expected(self):
+        m = self._base(has_audio=True, mean_volume_db=-30.0, silence_ratio=0.97, lufs=-60.0)
+        self.assertIn("silent_audio", detect_defects(m, expect_audio=True))
+        self.assertNotIn("silent_audio", detect_defects(m, expect_audio=False))
+
+    def test_missing_lufs_key_is_not_treated_as_silence(self):
+        m = self._base(has_audio=True, mean_volume_db=-30.0)
+        audio_defects = [d for d in detect_defects(m, expect_audio=True) if "audio" in d]
+        self.assertEqual(audio_defects, [])
+
+    def test_loudnorm_minus_inf_means_silent(self):
+        # loudnorm 对全静音音轨输出 -inf → 解析成 None，代表"有音轨但没声音"
+        m = self._base(has_audio=True, mean_volume_db=-30.0, silence_ratio=0.0, lufs=None)
+        self.assertIn("silent_audio", detect_defects(m, expect_audio=True))
+
+    def test_low_lufs_alone_triggers_low_volume(self):
+        # EBU R128 响度比 mean_volume 更贴近人耳：平均音量正常但响度偏低也要判
+        m = self._base(has_audio=True, mean_volume_db=-20.0, silence_ratio=0.1, lufs=-50.0)
+        self.assertIn("low_volume", detect_defects(m, expect_audio=True))
+
+
+class ExtendedProbeIntegrationTest(unittest.TestCase):
+    """真跑 ffmpeg 验证 measure_extended 能解析出指标（没装 ffmpeg 自动跳过）。
+
+    这是"参数真的影响可测指标"的回归防线：模糊度必须随 gblur 增大而上升，
+    否则判据就是摆设（闭环会拿着一个永远不变的数去修正）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not probe.has_ffmpeg():
+            raise unittest.SkipTest("没有 ffmpeg")
+        cls.tmp = tempfile.mkdtemp(prefix="hxmv_test_")
+        cls.clip = os.path.join(cls.tmp, "clip.mp4")
+        rc, _ = probe._run(
+            ["ffmpeg", "-y", "-v", "error",
+             "-f", "lavfi", "-i", "testsrc2=s=320x240:d=1:r=30",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+             cls.clip], timeout=120)
+        cls.built = rc == 0 and os.path.isfile(cls.clip)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(getattr(cls, "tmp", ""), ignore_errors=True)
+
+    def setUp(self):
+        if not self.built:
+            self.skipTest("测试视频生成失败（本机 ffmpeg 缺 libx264/aac？）")
+
+    def test_measures_blur_loudness_and_cuts(self):
+        ext = probe.measure_extended(self.clip, duration=1.0)
+        self.assertIsNotNone(ext.get("blur_mean"))
+        self.assertEqual(ext.get("scene_cuts"), 0)
+        self.assertIsNotNone(ext.get("lufs"))
+
+    def test_blurring_actually_raises_the_blur_metric(self):
+        blurred = os.path.join(self.tmp, "blurred.mp4")
+        rc, _ = probe._run(["ffmpeg", "-y", "-v", "error", "-i", self.clip,
+                            "-vf", "gblur=sigma=6", blurred], timeout=120)
+        if rc != 0:
+            self.skipTest("gblur 重编码失败")
+        clean = probe.measure_extended(self.clip, duration=1.0)
+        blurry = probe.measure_extended(blurred, duration=1.0)
+        self.assertGreater(blurry["blur_mean"], clean["blur_mean"])
+
+
+# ------------------------------------------- 三层评审：并行与异常隔离（v0.8）
+class PipelineCriticTest(unittest.TestCase):
+    """守住三层评审的两个新保证：
+    ① 并行执行但**返回顺序固定**（合并报告按顺序拼 detail，乱序会让人读不懂）；
+    ② 单层异常不再拖垮整次评审（原来一次 VLM 抖动 = 整次生产作废）。
+    """
+
+    @staticmethod
+    def _critic_with(layers):
+        from hxmv.core.critic import PipelineCritic
+        c = PipelineCritic()
+        c.layers = layers
+        return c
+
+    @staticmethod
+    def _layer(name, score, delay=0.0, boom=False):
+        from hxmv.quality import QualityReport
+
+        class _L:
+            layer = name
+
+            def evaluate(self, task, result):
+                if boom:
+                    raise RuntimeError("评审层挂了")
+                if delay:
+                    time.sleep(delay)
+                return QualityReport(layer=name, score=score)
+
+        return _L()
+
+    def test_layers_run_in_parallel_but_stay_ordered(self):
+        # 第一层故意最慢：并行时总耗时≈最慢那层，且返回顺序仍按声明顺序
+        c = self._critic_with([self._layer("L1_PHYSICS", 0.9, delay=0.30),
+                               self._layer("L2_VISUAL", 0.8, delay=0.30),
+                               self._layer("L3_SEMANTIC", 0.7, delay=0.30)])
+        t0 = time.time()
+        out = c.evaluate_layers(Task("GENERATE_SHOT"), {})
+        elapsed = time.time() - t0
+        self.assertEqual([r.layer for r in out], ["L1_PHYSICS", "L2_VISUAL", "L3_SEMANTIC"])
+        # 串行需要 0.9s；并行应远低于它（留足余量，避免慢 CI 上抖动误报）
+        self.assertLess(elapsed, 0.75)
+
+    def test_one_broken_layer_does_not_kill_the_review(self):
+        c = self._critic_with([self._layer("L1_PHYSICS", 0.9),
+                               self._layer("L2_VISUAL", 0.0, boom=True)])
+        out = c.evaluate_layers(Task("GENERATE_SHOT"), {})
+        self.assertEqual(len(out), 2)
+        self.assertIn("未完成判定", out[1].detail)
+        # 异常层不得静默消失：合并报告的 detail 里必须留下证据
+        merged = c.evaluate(Task("GENERATE_SHOT"), {})
+        self.assertIn("未完成判定", merged.detail)
 
 
 if __name__ == "__main__":

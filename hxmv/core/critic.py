@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from ..media import probe
 from ..quality import QualityReport
@@ -48,6 +49,11 @@ DEFECT_FIXES = {
     "action_mismatch":    ("rewrite_prompt_action", "动作与分镜不符：改写 prompt 写明动作"),
     "emotion_wrong":      ("rewrite_prompt_emotion", "情绪与分镜不符：改写 prompt 补情绪与氛围"),
     "plot_break":         ("rewrite_prompt_continuity", "与前后镜头不连续：改写 prompt 补衔接"),
+    # v0.8 由 ffmpeg 直接量出来的三类（blurdetect / scdet / silencedetect）：
+    # 它们的修正方向必须是**真改提示词或真改请求**——否则又是一个"报了缺陷但什么都没改"的空转。
+    "blurry":       ("rewrite_prompt_sharp", "画面糊：提示词锁清晰度（锐利对焦/细节清晰）"),
+    "multi_shot":   ("rewrite_prompt_single_shot", "模型自己剪了镜头：提示词锁「一个连续镜头、无剪辑」"),
+    "silent_audio": ("enable_audio", "有音轨但几乎全程静音：让生成模型真的出声"),
 }
 
 # 每层扣分权重（物理最致命——黑帧直接废片）
@@ -121,9 +127,12 @@ class L1PhysicsCritic(Critic):
             for p in (result.get("files") or []):
                 total += float((probe.probe_container(p) or {}).get("duration") or 0)
             expect = round(total, 2) if total > 0 else None
-        # 默认无声：只有这条任务明确要音频（with_audio）时，缺音轨/音量低才算缺陷
+        # 默认无声：只有这条任务明确要音频（with_audio）时，缺音轨/音量低才算缺陷。
+        # 同理"一个连续镜头"只对单镜头任务成立——成片本来就该由多个镜头拼成，
+        # 拿 multi_shot 判成片等于把每一部成片都判死（且修无可修）。
         metrics = probe.inspect(target, expect_duration=expect,
-                                expect_audio=bool(task.input.get("with_audio")))
+                                expect_audio=bool(task.input.get("with_audio")),
+                                expect_single_shot=(task.action == ACTION_GENERATE_SHOT))
         if metrics is not None:
             result["metrics"] = metrics                    # 量出来的原始指标，随事件流给面板/审计
             return self._report(metrics["defects"], detail=probe.describe(metrics))
@@ -368,9 +377,37 @@ class PipelineCritic:
         """
         key = (task.task_id, task.retry_policy.get("attempts"), id(result))
         if key != self._cache_key:
-            self._cache = [layer.evaluate(task, result) for layer in self.layers]
+            self._cache = self._run_layers(task, result)
             self._cache_key = key
         return self._cache
+
+    def _run_layers(self, task: Task, result: dict) -> list[QualityReport]:
+        """三层并行执行，返回顺序固定为 [L1, L2, L3]。
+
+        为什么能安全并行：三层互不依赖，各自只读产物文件、只写自己那部分 result 键
+        （L1 写 metrics/defects、L2 写 consistency/vision_review、L3 写 vision_review）。
+        为什么值得并行：配了视觉模型时 L2 与 L3 各有**一次 HTTP 往返**（实测 2~5 秒），
+        串行就是白等两趟；L1 是 ffmpeg 调用，和它们没有任何先后关系。
+        合并报告必须保序（`merge` 会按顺序拼 detail），所以用 `map` 而不是 `as_completed`。
+
+        **单层异常隔离**：某层抛异常时，原来会把整个 run 打挂（一次评审不稳定 = 整次生产作废）。
+        现在只让那一层返回"未完成判定"的空报告并在 detail 里如实写明——不假装检查过，
+        也不因为一个层崩掉就中断生产。
+        """
+        if len(self.layers) <= 1:
+            return [self._layer_safe(layer, task, result) for layer in self.layers]
+        with ThreadPoolExecutor(max_workers=len(self.layers)) as pool:
+            return list(pool.map(lambda layer: self._layer_safe(layer, task, result), self.layers))
+
+    @staticmethod
+    def _layer_safe(layer: Critic, task: Task, result: dict) -> QualityReport:
+        try:
+            return layer.evaluate(task, result)
+        except Exception as e:
+            return QualityReport(
+                layer=layer.layer, score=1.0,
+                detail=f"{layer.layer} 评审异常，本层未完成判定（不影响其他层）："
+                       f"{type(e).__name__}: {e}"[:200])
 
     def evaluate(self, task: Task, result: dict) -> QualityReport:
         merged = QualityReport(layer="PIPELINE", score=1.0)
