@@ -113,8 +113,16 @@ class L1PhysicsCritic(Critic):
             return QualityReport(layer=self.layer)
 
         target = result.get("media") if task.action == ACTION_GENERATE_SHOT else result.get("output")
+        # 成片的时长预期 = **各镜头时长之和**。不给的话会拿默认值去比 →
+        # 两个 5 秒镜头拼出来的 10 秒成片被判 too_long，反复 RETRY 到最后 FAIL（实测踩过）。
+        expect = task.input.get("duration")
+        if task.action == ACTION_COMPOSE and not expect:
+            total = 0.0
+            for p in (result.get("files") or []):
+                total += float((probe.probe_container(p) or {}).get("duration") or 0)
+            expect = round(total, 2) if total > 0 else None
         # 默认无声：只有这条任务明确要音频（with_audio）时，缺音轨/音量低才算缺陷
-        metrics = probe.inspect(target, expect_duration=task.input.get("duration"),
+        metrics = probe.inspect(target, expect_duration=expect,
                                 expect_audio=bool(task.input.get("with_audio")))
         if metrics is not None:
             result["metrics"] = metrics                    # 量出来的原始指标，随事件流给面板/审计
