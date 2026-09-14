@@ -204,10 +204,12 @@ class ProviderExecutor(Executor):
         # 能力钳制：要求超过 provider 上限的时长只会换来**必然的 too_short + 修无可修**
         # （实测：要 8s、模型只给 5.1s，连修 4 轮产物一模一样）。要不到就别要。
         cap = getattr(self.provider, "max_duration", None)
+        capped_from = None
         if task.action == ACTION_GENERATE_SHOT and cap:
             want = float(api_task.input.get("duration") or 0)
             if want > cap:
                 api_task.input["duration"] = cap
+                capped_from = want      # 记下"原本要多少"：评审得按**能力上限**算预期时长
         for (src_where, src_key), (dst_where, dst_key, fn) in _PROJECTION.items():
             src = task.constraints if src_where == "constraints" else task.input
             if src_key in src:
@@ -216,7 +218,13 @@ class ProviderExecutor(Executor):
         api_task.input["_projected"] = {
             k: (api_task.input if w == "input" else api_task.constraints).get(k)
             for (w, k), *_ in _PROJECTION.items()}
-        return self.provider.generate(api_task)
+        out = self.provider.generate(api_task)
+        if capped_from and isinstance(out, dict):
+            # 要 15 秒、模型只能给 5 秒：5 秒就是**对的**，不能拿 15 去判 too_short
+            # （实测：免费档 5 秒封顶，剧本按 10/15 秒写 → 镜头被判 too_short 反复 RETRY 到死）
+            out.setdefault("expected_duration", api_task.input.get("duration"))
+            out.setdefault("duration_capped_from", capped_from)
+        return out
 
 
 def _auto_provider() -> str:
