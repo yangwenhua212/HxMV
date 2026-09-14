@@ -191,6 +191,20 @@ ACTIVE_RUNS: set[str] = set()
 MANAGER = RunManager()
 
 
+def _poster_for(run_id: str) -> str:
+    """作品库封面：优先成片，其次镜头、素材图。只回**文件名**（前端拿它走 /api/artifact）。"""
+    adir = os.path.join(RUNS_DIR, run_id, "artifacts")
+    try:
+        names = sorted(os.listdir(adir))
+    except OSError:
+        return ""
+    for want in ("final_", "shot_", "asset_", "base_"):
+        for n in names:
+            if n.startswith(want) and n.lower().endswith(MEDIA_EXTS):
+                return n
+    return ""
+
+
 def _scan_runs() -> list[dict]:
     """扫描磁盘 runs 目录，读每个 events.jsonl 首/尾行出摘要。"""
     out = []
@@ -239,6 +253,7 @@ def _scan_runs() -> list[dict]:
             "brain_size": (head.get("brain") or {}).get("size", 0),
             "status": status,
             "tail": tail,
+            "poster": _poster_for(name),
         })
     return out[:50]
 
