@@ -270,6 +270,17 @@
   .sec-title { font-size: 18px; font-weight: 700; }
   /* 空对话不留空框 */
   #chatLog:empty { display: none; }
+  /* 通用语义色：替代 JS 里二十多处内联 style="color:..."（内联没法统一换主题） */
+  .dim { color: var(--dim); }
+  .t-warn { color: var(--amber); }
+  .t-bad { color: var(--red); }
+  .t-good { color: var(--green); }
+  /* 人工审批按钮（原来是 JS 里的两条长内联样式，只在事件渲染里用一次） */
+  .ckRow { display: flex; gap: 8px; margin-top: 8px; }
+  .ckRow button { border-radius: 8px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+  .ckRow .ok { background: var(--green); color: #04231b; border: none; font-weight: 600; }
+  .ckRow .no { background: none; border: 1px solid var(--red); color: var(--red); }
+  .ckNote { font-size: 12px; }
 </style>
 </head>
 <body>
@@ -461,7 +472,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-let currentRun = null, es = null, hintTimer = null;
+let currentRun = null, es = null;
 
 // ---- 公网 token ----
 const URLTOKEN = new URLSearchParams(location.search).get("token") || "";
@@ -471,10 +482,14 @@ function hx(path, opts = {}) {
   opts.headers = Object.assign({ "X-Hxmv-Token": TOKEN }, opts.headers || {});
   return fetch(path, opts);
 }
-function sseUrl(path) { return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN); }
+/** 带令牌的地址：SSE / 产物 / 参考图预览共用这一处。
+ *  （EventSource 没法加请求头，只能走 query；统一在这里拼，别到处手写 token=） */
+function withToken(path) {
+  return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN);
+}
 /** 产物地址（缩略图 / 播放器共用）：面板也种了 Cookie，两条路都通。 */
 function artUrl(runId, name) {
-  return `/api/artifact?run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(name)}&token=${encodeURIComponent(TOKEN)}`;
+  return withToken(`/api/artifact?run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(name)}`);
 }
 // 拉接口并保证拿到真数据：401（没填/填错令牌）等错误在这里抛出真实原因，
 // 别让页面把「{error:...}」当成正常数据渲染出 undefined（真机出现过「🧠 undefined 条经验」）
@@ -520,13 +535,18 @@ const ACTIONS = { STORYBOARD: "分镜", GENERATE_CHARACTER: "角色", GENERATE_S
 const FAILURES = {
   black_frame: "黑帧", low_clarity: "清晰度不足", motion_blur: "运动模糊", fps_too_low: "帧率过低",
   low_volume: "音量过低", no_audio: "缺音轨（任务要了音频）", character_inconsistency: "角色不一致", scene_inconsistency: "场景不一致",
-  semantic_mismatch: "与剧本不符", frozen_frame: "画面静止", too_short: "时长不足", too_long: "超时长"
+  semantic_mismatch: "与剧本不符", frozen_frame: "画面静止", too_short: "时长不足", too_long: "超时长",
+  // v0.8 由 ffmpeg 直接量出来的三类（漏了这几个键，界面就会直接显示英文缺陷名）
+  blurry: "画面模糊", multi_shot: "模型自己剪了镜头", silent_audio: "有音轨但全程静音"
 };
 const SUGGESTIONS = {
   increase_reference_strength: "加强参考", reduce_motion_scale: "减小运动幅度",
   increase_motion_scale: "提高运动幅度", increase_resolution: "升到 720p", increase_fps: "提到 30fps",
   boost_audio_gain: "音量增益", enable_audio: "加上音轨", trim_black_frames: "去掉黑场", extend_duration: "补时长",
-  trim_duration: "裁时长", rewrite_prompt_closer: "贴合剧本"
+  trim_duration: "裁时长", rewrite_prompt_closer: "贴合剧本",
+  rewrite_prompt_action: "锁死动作", rewrite_prompt_emotion: "锁死情绪",
+  rewrite_prompt_continuity: "补衔接", rewrite_prompt_sharp: "锁清晰度",
+  rewrite_prompt_single_shot: "锁单镜头"
 };
 const zh = (d, k, fb) => d[k] || fb || k;
 const fmt = t => new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false });
@@ -537,11 +557,20 @@ function zhContent(s) {
   for (const k in SUGGESTIONS) s = s.split(k).join(SUGGESTIONS[k]);
   return s.replace("修正成功", "修正有效").replace("失败「", "「").replace("」用 ", "」 → ");
 }
-function hint(msg, isErr) {
-  $("runHint").textContent = (isErr ? "⚠ " : "✓ ") + msg;
-  clearTimeout(hintTimer);
-  hintTimer = setTimeout(() => $("runHint").textContent = "", 4000);
+// 提示条统一入口（以前五个各写一份"取元素/设文本/清定时器/上色"，还各占一个全局 timer）
+const hintTimers = new Map();
+function setHint(id, msg, opt = {}) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = (opt.prefix ? (opt.isErr ? "⚠ " : "✓ ") : "") + (msg || "");
+  el.style.color = opt.isErr ? "var(--red)" : (opt.color || "");
+  const old = hintTimers.get(id);
+  if (old) clearTimeout(old);
+  if (opt.clearMs) {
+    hintTimers.set(id, setTimeout(() => { el.textContent = ""; el.style.color = ""; }, opt.clearMs));
+  }
 }
+const hint = (msg, isErr) => setHint("runHint", msg, { isErr, prefix: true, clearMs: 4000 });
 
 // ---------- 大脑 ----------
 async function refreshBrain() {
@@ -608,73 +637,113 @@ async function sendApprove(ev, approved, div) {
   const btns = div.querySelectorAll(".ckRow button");
   btns.forEach(b => { b.disabled = true; });
   try {
-    const d = await (await hx("/api/approve", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_id: currentRun || "", task_id: ev.task_id, approve: approved })
-    })).json();
-    if (note) note.innerHTML = `<span style="color:var(--dim)">${esc(d.detail || (d.ok ? "已处理" : "没有待审批项"))}</span>`;
+    const d = await postJson("/api/approve",
+      { run_id: currentRun || "", task_id: ev.task_id, approve: approved });
+    if (note) note.innerHTML = `<span class="dim">${esc(d.detail || (d.ok ? "已处理" : "没有待审批项"))}</span>`;
   } catch (e) {
-    if (note) note.innerHTML = `<span style="color:var(--red)">提交失败：${esc(e.message)}</span>`;
+    if (note) note.innerHTML = `<span class="t-bad">提交失败：${esc(e.message)}</span>`;
     btns.forEach(b => { b.disabled = false; });
   }
 }
 
-// ---------- 渲染事件 ----------
-function renderEvent(ev, container) {
-  const div = document.createElement("div");
-  div.className = "ev " + (ev.type + " " + (ev.decision || "")).toLowerCase();
-  const t = `<div class="meta">${fmt(ev.ts)}</div>`;
-  const actName = ACTIONS[ev.action] || ev.action;
+// ---------- 事件渲染（**唯一一套**：实时流与回放共用；live 区分可交互与历史）----------
+/** 完成清单：时间线与执行报告共用一份（以前两处各写一遍，信息还不一致）。 */
+function doneRows(completed, cls = "sub") {
+  return (completed || []).map(c => `<div class="${cls}">✅ <b>${ACTIONS[c.action] || c.action}</b>`
+    + (c.score ? ` · 质量 ${c.score}` : "")
+    + (c.refine_history?.length ? ` · 修正 ${c.refine_history.length} 次` : "") + `</div>`).join("");
+}
 
-  if (ev.type === "run.start") {
-    div.innerHTML = t + `<div class="title">开始生产</div><div class="sub">${esc(ev.goal)}</div>`;
-  } else if (ev.type === "task.start") {
-    div.innerHTML = t + `<div class="title"><span class="act ${ev.kind === "retry" ? "retry" : ""}">${actName}</span>${ev.kind === "retry" ? "重新生成" : ev.prompt ? esc(ev.prompt.slice(0, 40)) : ""}</div>`;
-  } else if (ev.type === "infra.retry") {
-    div.innerHTML = t + `<div class="title" style="color:var(--amber)">服务繁忙，重试 ${ev.attempt}/4</div>`;
-  } else if (ev.type === "infra.abort") {
-    div.innerHTML = t + `<div class="title" style="color:var(--red)">已停止：环境问题</div><div class="sub" style="color:var(--dim)">${esc(ev.hint || "")}</div><div class="sub" style="color:var(--dim)">${esc(ev.error || "")}</div>`;
-  } else if (ev.type === "checkpoint.request") {
-    div.innerHTML = t + `<div class="title" style="color:var(--amber)">⏸ 等你确认（还没花钱）</div>
-      <div class="sub">${actName}${ev.prompt ? "：" + esc(ev.prompt) : ""}</div>
-      <div class="ckRow" style="display:flex;gap:8px;margin-top:8px">
-        <button style="background:var(--green);color:#04231b;border:none;border-radius:8px;padding:5px 14px;font-size:13px;font-weight:600;cursor:pointer">批准</button>
-        <button style="background:none;border:1px solid var(--red);color:var(--red);border-radius:8px;padding:5px 14px;font-size:13px;cursor:pointer">拒绝</button>
-      </div><div class="ckNote"></div>`;
+function criticHtml(ev) {
+  const layers = (ev.layers || []).map(l =>
+    `<span class="layer">${l.layer.split("_")[0]}</span>` +
+    `<span class="bar"><i style="width:${Math.round(l.score * 100)}%;background:${layerColor(l.score)}"></i></span>`).join("");
+  const pills = (ev.failures || []).map((f, i) =>
+    `<span class="pill red">${zh(FAILURES, f)} · ${zh(SUGGESTIONS, (ev.suggestions || [])[i])}</span>`).join("");
+  return `<div class="title">质量评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div>`
+    + `<div class="scorebar">${layers}</div>`
+    + (pills ? `<div>${pills}</div>` : "")
+    + (ev.detail ? `<div class="sub dim">🔍 ${esc(ev.detail)}</div>` : "");
+}
+
+function decisionHtml(ev) {
+  const map = { PASS: ["通过", "green"], RETRY: ["修正后重试", "amber"], FAIL: ["失败", "red"] };
+  const [label, cls] = map[ev.decision] || [ev.decision, "gray"];
+  let extra = "";
+  if (ev.decision === "PASS" && ev.fixes_applied?.length) {
+    extra = `<div class="sub dim">已记住：${ev.fixes_applied.map(f => zh(FAILURES, f.failure) + "用" + zh(SUGGESTIONS, f.suggestion) + "修").join("、")}</div>`;
+  } else if (ev.decision === "RETRY") {
+    extra = `<div class="sub dim">第 ${ev.attempts_used}/${ev.max_attempts} 次</div>`;
+  } else if (ev.decision === "FAIL") {
+    extra = `<div class="sub dim">多次修正仍未达标</div>`;
+  }
+  return `<div class="title"><span class="pill ${cls}">${label}</span></div>${extra}`;
+}
+
+/** 事件 → HTML（实时与回放共用；live=false 时不渲染审批按钮）。 */
+function eventHtml(ev, live) {
+  const t = `<div class="meta">${fmt(ev.ts)}</div>`;
+  const act = ACTIONS[ev.action] || ev.action || "";
+  switch (ev.type) {
+    case "run.start":
+      return t + `<div class="title">开始生产</div><div class="sub">${esc(ev.goal)}</div>`;
+    case "task.start":
+      return t + `<div class="title"><span class="act ${ev.kind === "retry" ? "retry" : ""}">${act}</span>`
+        + (ev.kind === "retry" ? "重新生成" : ev.prompt ? esc(ev.prompt.slice(0, 40)) : "") + `</div>`;
+    case "infra.retry":
+      return t + `<div class="title t-warn">服务繁忙，重试 ${ev.attempt}/4</div>`;
+    case "infra.abort":
+      return t + `<div class="title t-bad">已停止：环境问题</div>`
+        + `<div class="sub dim">${esc(ev.hint || "")}</div><div class="sub dim">${esc(ev.error || "")}</div>`;
+    case "checkpoint.request":
+      return live
+        ? t + `<div class="title t-warn">⏸ 等你确认（还没花钱）</div>`
+          + `<div class="sub">${act}${ev.prompt ? "：" + esc(ev.prompt) : ""}</div>`
+          + `<div class="ckRow"><button class="ok">批准</button><button class="no">拒绝</button></div>`
+          + `<div class="ckNote"></div>`
+        : t + `<div class="title t-warn">⏸ 曾等待人工确认</div>`;
+    case "checkpoint":
+      return t + `<div class="title ${ev.approved ? "t-good" : "t-bad"}">`
+        + (ev.approved ? "✅ 人工已批准，继续开工" : "⛔ 人工拒绝，跳过（未产生费用）") + `</div>`
+        + `<div class="sub dim">${esc(ev.note || "")}</div>`;
+    case "critic":
+      return t + criticHtml(ev);
+    case "decision":
+      return t + decisionHtml(ev);
+    case "run.done": {
+      const rows = doneRows(ev.completed);
+      const fails = (ev.failed || []).map(f => `<div class="sub">❌ ${ACTIONS[f.action] || f.action}</div>`).join("");
+      return t + `<div class="title">生产完成</div>${rows}${fails}`
+        + `<div class="sub dim">${ev.completed?.length || 0} 项完成 · ${ev.attempts} 次尝试 · ${ev.cost_units} 元`
+        + (ev.budget_exhausted ? " · 预算用尽" : "") + `</div>`;
+    }
+    default:
+      // 未知事件不静默丢：显示类型名（后端加新事件时界面能立刻看出来，而不是"点了没反应"）
+      return t + `<div class="sub dim">${esc(ev.type)}</div>`;
+  }
+}
+
+/** 追加一个事件块（实时与回放唯一的入口）。 */
+function appendEvent(ev, container, live) {
+  const html = eventHtml(ev, live);
+  if (!html) return null;
+  const div = document.createElement("div");
+  div.className = `ev ${ev.type} ${ev.decision || ""}`.toLowerCase();
+  div.innerHTML = html;
+  if (live && ev.type === "checkpoint.request") {
     const btns = div.querySelectorAll(".ckRow button");
     btns[0].onclick = () => sendApprove(ev, true, div);
     btns[1].onclick = () => sendApprove(ev, false, div);
-  } else if (ev.type === "checkpoint") {
-    div.innerHTML = t + `<div class="title" style="color:${ev.approved ? "var(--green)" : "var(--red)"}">${ev.approved ? "✅ 人工已批准，继续开工" : "⛔ 人工拒绝，跳过（未产生费用）"}</div><div class="sub" style="color:var(--dim)">${esc(ev.note || "")}</div>`;
-  } else if (ev.type === "critic") {
-    const layers = (ev.layers || []).map(l =>
-      `<span class="layer">${l.layer.split("_")[0]}</span><span class="bar"><i style="width:${Math.round(l.score * 100)}%;background:${layerColor(l.score)}"></i></span>`).join("");
-    const pills = (ev.failures || []).map((f, i) =>
-      `<span class="pill red">${zh(FAILURES, f)} · ${zh(SUGGESTIONS, (ev.suggestions || [])[i])}</span>`).join("");
-    const measured = ev.detail ? `<div class="sub" style="color:var(--dim)">🔍 ${esc(ev.detail)}</div>` : "";
-    div.innerHTML = t + `<div class="title">质量评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div>
-      <div class="scorebar">${layers}</div>${pills ? `<div>${pills}</div>` : ""}${measured}`;
-  } else if (ev.type === "decision") {
-    const map = { PASS: ["通过", "green"], RETRY: ["修正后重试", "amber"], FAIL: ["失败", "red"] };
-    const [label, cls] = map[ev.decision] || [ev.decision, "gray"];
-    let extra = "";
-    if (ev.decision === "PASS" && ev.fixes_applied?.length) {
-      extra = `<div class="sub" style="color:var(--dim)">已记住：${ev.fixes_applied.map(f => zh(FAILURES, f.failure) + "用" + zh(SUGGESTIONS, f.suggestion) + "修").join("、")}</div>`;
-    } else if (ev.decision === "RETRY") {
-      extra = `<div class="sub" style="color:var(--dim)">第 ${ev.attempts_used}/${ev.max_attempts} 次</div>`;
-    } else if (ev.decision === "FAIL") {
-      extra = `<div class="sub" style="color:var(--dim)">多次修正仍未达标</div>`;
-    }
-    div.innerHTML = t + `<div class="title"><span class="pill ${cls}">${label}</span></div>${extra}`;
-  } else if (ev.type === "run.done") {
-    const rows = (ev.completed || []).map(c => `<div class="sub">✅ ${ACTIONS[c.action] || c.action}${c.refine_history.length ? `（修正 ${c.refine_history.length} 次）` : ""}</div>`).join("");
-    const fails = (ev.failed || []).map(f => `<div class="sub">❌ ${ACTIONS[f.action] || f.action}</div>`).join("");
-    div.innerHTML = t + `<div class="title">生产完成</div>${rows || ""}${fails}
-      <div class="sub" style="color:var(--dim)">${ev.completed.length} 项完成 · ${ev.attempts} 次尝试 · ${ev.cost_units} 元${ev.budget_exhausted ? " · 预算用尽" : ""}</div>`;
-    closeLive("完成");
   }
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+/** 实时流：追加事件，run.done 时收尾（关流 + 刷新大脑与作品库）。 */
+function renderEvent(ev, container) {
+  appendEvent(ev, container, true);
+  if (ev.type === "run.done") closeLive("完成");
 }
 
 function closeLive(tag) {
@@ -691,10 +760,7 @@ async function submitRun() {
   const project = $("projectInput").value.trim();
   $("runBtn").disabled = true; $("runBtn").textContent = "生产中…";
   try {
-    const res = await (await hx("/api/run", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, provider, project })
-    })).json();
+    const res = await postJson("/api/run", { goal, provider, project });
     if (res.error) throw new Error(res.error);
     startStream(res.run_id);
   } catch (e) {
@@ -715,7 +781,7 @@ function startStream(runId) {
   $("taskBox").hidden = false;
   $("liveTitle").textContent = "实时过程";
   $("taskBox").scrollIntoView({ behavior: "smooth", block: "nearest" });
-  es = new EventSource(sseUrl(`/api/stream?run_id=${runId}`));
+  es = new EventSource(withToken(`/api/stream?run_id=${runId}`));
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
     renderEvent(ev, tl);
@@ -735,9 +801,8 @@ function collapseProc(tl) {
 
 function showSummary(ev, runId, aborted) {
   $("sumBox").style.display = "block";
-  const rows = (ev.completed || []).map(c =>
-    `<div class="line">✅ <b>${ACTIONS[c.action] || c.action}</b> · 质量 ${c.score}${c.refine_history.length ? ` · 修正 ${c.refine_history.length} 次` : ""}</div>`).join("")
-    + (aborted ? '<div class="line" style="color:var(--amber)">⚠️ 这次没跑完（服务重启会打断），下面是已经产出的</div>' : "");
+  const rows = doneRows(ev.completed, "line")
+    + (aborted ? '<div class="line t-warn">⚠️ 这次没跑完（服务重启会打断），下面是已经产出的</div>' : "");
   // 真实产物（local provider）：只给落盘的绝对路径做下载/预览链接
   const files = (ev.outputs || []).filter(p => String(p).startsWith("/"));
   // 磁盘为准：有的任务把文件真写出来了却被判失败（实测成片就是这样被漏掉的），
@@ -757,7 +822,7 @@ function paintArts(files, runId, rows) {
   files.sort((a, b) => rank(a) - rank(b) || String(a).localeCompare(String(b)));
   const arts = files.map(p => {
     const name = String(p).split("/").pop();
-    const url = `/api/artifact?run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(name)}&token=${encodeURIComponent(TOKEN)}`;
+    const url = artUrl(runId, name);
     const kind = name.startsWith("final") ? "成片"
       : name.startsWith("shot") ? "镜头"
       : name.startsWith("asset_") ? "底图（模型起始帧，不是参考图）"
@@ -786,24 +851,11 @@ async function replay(runId) {
   try {
     const d = await (await hx(`/api/run/${runId}`)).json();
     let done = null, opened = "";
+    // 与实时流共用同一个渲染器（appendEvent）：历史里现在也能看到分层分数与"已记住哪些修正"
     for (const ev of d.events) {
-      const div = document.createElement("div");
-      div.className = "ev " + (ev.type + " " + (ev.decision || "")).toLowerCase();
-      const t = `<div class="meta">${fmt(ev.ts)}</div>`;
-      const actName = ACTIONS[ev.action] || ev.action;
-      let html = "";
-      if (ev.type === "run.start") { opened = ev.goal; html = t + `<div class="title">开始</div><div class="sub">${esc(ev.goal)}</div>`; }
-      else if (ev.type === "task.start") html = t + `<div class="title"><span class="act ${ev.kind === "retry" ? "retry" : ""}">${actName}</span></div>`;
-      else if (ev.type === "infra.retry") html = t + `<div class="title" style="color:var(--amber)">服务繁忙，重试 ${ev.attempt}/4</div>`;
-      else if (ev.type === "infra.abort") html = t + `<div class="title" style="color:var(--red)">已停止：环境问题</div><div class="sub" style="color:var(--dim)">${esc(ev.hint || "")}</div>`;
-      // 回放是历史：不渲染可点击的审批按钮（那个动作早就决议完了，点了只会得到"没有待审批项"）
-      else if (ev.type === "checkpoint.request") html = t + `<div class="title" style="color:var(--amber)">⏸ 曾等待人工确认</div>`;
-      else if (ev.type === "checkpoint") html = t + `<div class="title" style="color:${ev.approved ? "var(--green)" : "var(--red)"}">${ev.approved ? "✅ 人工批准" : "⛔ 人工拒绝"}</div>`;
-      else if (ev.type === "critic") html = t + `<div class="title">评审 <span class="scoresum" style="color:${layerColor(ev.score)}">${ev.score.toFixed(2)}</span></div><div>${(ev.failures || []).map(f => `<span class="pill red">${zh(FAILURES, f)}</span>`).join("")}</div>`;
-      else if (ev.type === "decision") html = t + `<div class="title">${ev.decision === "PASS" ? "✅ 通过" : ev.decision === "RETRY" ? "🔧 重试" : "❌ 失败"}</div>`;
-      else if (ev.type === "run.done") { done = ev; html = t + `<div class="title">完成</div><div class="sub" style="color:var(--dim)">${ev.completed.length} 项完成 · ${ev.attempts} 次尝试</div>`; }
-      else continue;
-      div.innerHTML = html; tl.appendChild(div);
+      appendEvent(ev, tl, false);
+      if (ev.type === "run.start") opened = ev.goal;
+      if (ev.type === "run.done") done = ev;
     }
     // 历史回放同样要交出成品：以前这里只画时间线、再也不打开「执行报告」，
     // 于是在历史里点开任何一次跑都**永远看不到成片**（真机反馈「网页里看不了」的正主）
@@ -832,7 +884,7 @@ $("plusBtn").onclick = () => { showPage("session"); refreshRef(); };   // 参考
 $("modelBtn").onclick = () => showPage("settings");                    // 档位在设置
 
 // ---------- 创作首页：功能胶囊 + 底部大输入框 ----------
-function ideaTip(t) { const el = $("ideaHint"); if (el) el.textContent = t || ""; }
+const ideaTip = (t) => setHint("ideaHint", t);
 const PILL_ACTS = {
   seedance: () => { $("providerSel").value = "zhipu"; ideaTip("已选：智谱 AI 真视频（免费档）"); },
   focus: () => $("ideaInput").focus(),
@@ -860,12 +912,7 @@ showPage(TOKEN ? "create" : "settings");
 
 
 // ---------- 设置页：接口配置 ----------
-let cfgTimer = null;
-function cfgHint(msg) {
-  $("cfgHint").textContent = msg;
-  clearTimeout(cfgTimer);
-  cfgTimer = setTimeout(() => $("cfgHint").textContent = "", 4000);
-}
+const cfgHint = (msg) => setHint("cfgHint", msg, { clearMs: 4000 });
 async function refreshConfig() {
   if (!TOKEN) { cfgHint("先在上面填令牌"); return; }
   try {
@@ -888,8 +935,7 @@ async function saveConfig(provider, keyId) {
   if (key) body.key = key;
   if (provider === "zhipu") { body.video_model = $("videoModel").value; body.vlm_model = $("vlmModel").value; }
   try {
-    const d = await (await hx("/api/config", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body) })).json();
+    const d = await postJson("/api/config", body);
     if (d.ok) { $(keyId).value = ""; cfgHint("已保存，立即生效"); refreshConfig(); }
     else cfgHint("保存失败，请重试");
   } catch (e) { cfgHint("保存失败，请重试"); }
@@ -902,7 +948,7 @@ $("vlmModel").onchange = () => saveConfig("zhipu", "keyZhipu");
 // ---------- 对话（老大要求：HxMV 也要能聊天）----------
 // 说一句话 → 它回一句话 + 给出可执行目标；点「开工」才真的跑。不点就不烧钱、不落档。
 let chatHistory = [];   // 只留在内存：刷新即清（对话不需要长期留档）
-function chatHint(t, bad) { const el = $("chatHint"); el.textContent = t || ""; el.style.color = bad ? "var(--red)" : "var(--dim)"; }
+const chatHint = (t, bad) => setHint("chatHint", t, { isErr: bad, color: "var(--dim)" });
 function chatSay(role, text, goal) {
   $("chatEmpty").hidden = true;              // 一开口就收起起点
   const box = $("chatLog"), el = document.createElement("div");
@@ -961,7 +1007,7 @@ $("runBtn").onclick = submitRun;
 $("goalInput").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitRun(); });
 
 // ---------- 参考图（图生视频的首帧）：上传 → 自动裁主视觉 → 落进项目档案 ----------
-function refHint(msg, isErr) { $("refHint").textContent = (isErr ? "⚠ " : "✓ ") + msg; }
+const refHint = (msg, isErr) => setHint("refHint", msg, { isErr, prefix: true });
 function refProject() { return $("projectInput").value.trim(); }
 // 选中的图片（支持一次多张）：{ file, key } —— key 是要填的键名（镜头里的角色名／场景名）
 let refSel = [];
@@ -1051,7 +1097,6 @@ async function refPayload(preview) {
   return { project: pid, kind: $("refKind").value, key: key, name: key,
            mode: $("refMode").value, preview: !!preview, image: await fileData(refSel[0].file) };
 }
-function hxUrl(path) { return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN); }
 async function refreshRef() {
   const box = $("refList"), pid = refProject();
   if (!pid) { box.innerHTML = ""; refHint("上面填了项目名，就能传参考图"); return; }
@@ -1070,7 +1115,7 @@ async function refreshRef() {
   for (const it of items) {
     const el = document.createElement("div");
     el.className = "refItem";
-    el.innerHTML = '<img src="' + hxUrl(it.url) + '" alt=""><b>' + esc(it.label + "·" + it.key) + '</b>'
+    el.innerHTML = '<img src="' + withToken(it.url) + '" alt=""><b>' + esc(it.label + "·" + it.key) + '</b>'
       + (it.placeholder ? '<b style="color:var(--amber)">占位（系统生成，建议换成真图）</b>' : "")
       + (it.exists ? '<button title="注销">×</button>' : '<b style="color:var(--red)">文件丢了</b>');
     if (it.exists) el.querySelector("button").onclick = () => delRef(it);
@@ -1098,7 +1143,7 @@ $("refSaveBtn").onclick = async () => {
     refHint("正在存…");
     const d = await postJson("/api/ref", await refPayload(false));
     const img = $("refPreview");
-    img.src = hxUrl("/api/ref/image?project=" + encodeURIComponent(d.project) + "&kind=" + d.kind + "&key=" + encodeURIComponent(d.key));
+    img.src = withToken("/api/ref/image?project=" + encodeURIComponent(d.project) + "&kind=" + d.kind + "&key=" + encodeURIComponent(d.key));
     img.style.display = "block";
     refHint("已登记 " + d.out_size[0] + "×" + d.out_size[1] + "：跑生产时不要用 --fresh，否则档案会被清掉");
     refreshRef();
