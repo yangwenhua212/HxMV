@@ -425,11 +425,22 @@ class LocalRenderProvider(VideoProvider):
             args += ["-map", "[aout]", "-c:a", "aac"]
         args += [*probe.encoder_args(24), "-pix_fmt", "yuv420p", out]
         self._ff(args)
+
+        # 音画交付：剧本里的「旁白/音效」在这一步真做进成片（视频模型本身不带音轨）
+        audio_info = None
+        if task.input.get("narration") or task.input.get("sfx"):
+            from ..media import audio as audio_mod
+            audio_info = audio_mod.apply(out, {"narration": task.input.get("narration"),
+                                               "sfx": task.input.get("sfx")}, self.outdir)
+
         cont = probe.probe_container(out) or {}
         result = {"output": out, "shots": list(keys), "files": paths,
                   "duration": cont.get("duration"), "trimmed_black": trim,
                   "reused": False, "fingerprint": fp,
+                  "audio": audio_info,
                   "cost_units": self.estimate_cost(task.action)}
+        if audio_info and audio_info.get("expected_duration"):
+            result["expected_duration"] = audio_info["expected_duration"]
         if self.project:
             self.project.register_shot(
                 fp, out, episode=self.episode,

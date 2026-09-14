@@ -13,6 +13,7 @@ import json
 import re
 
 from . import llm
+from . import script
 from .state import (
     ACTION_COMPOSE, ACTION_GENERATE_CHARACTER, ACTION_GENERATE_SCENE,
     ACTION_GENERATE_SHOT, ACTION_STORYBOARD, ExecutionState, Task,
@@ -84,6 +85,61 @@ def _first_scene_prompt(goal: str) -> str:
     """从目标里抠出一个像样的镜头提示词（演示用，mock 世界够用）。"""
     m = re.search(r"[，。,.；;]?\s*([^，。,.；;]{4,24})$", goal)
     return m.group(1) if m else goal
+
+
+class ScriptPlanner(Planner):
+    """照剧本拆镜头：用户给了分镜剧本就**按剧本做**，不重新编排。
+
+    为什么单独一个规划器（实测）：把整段剧本当 goal 交给 LLM 规划器，它会按自己的理解
+    重排（镜数、内容都对不上——用户写的"全景大海 → 穿过云层 → 山顶仙石"被换成别的）。
+    剧本是**规格**不是灵感：能解析就照做，解析不出来才交回 LLM。
+    """
+
+    def __init__(self, goal: str, plan: dict, brain=None, project=None):
+        self._queue: list[Task] = []
+        self._built = False
+        self._goal = goal
+        self._plan = plan
+        self._brain = brain
+        self.project = project
+
+    def next_task(self, state: ExecutionState) -> Task | None:
+        if not self._built:
+            self._build(state)
+            self._built = True
+        return self._queue.pop(0) if self._queue else None
+
+    def _build(self, state: ExecutionState) -> None:
+        p = self._plan
+        char_key = next(iter(self.project.characters), "主角") if self.project else "主角"
+        scene_key = next(iter(self.project.scenes), "场景") if self.project else "场景"
+        style = self.project.style if self.project else "cinematic"
+        shots = list(p.get("shots") or [])
+        tasks = [Task(ACTION_STORYBOARD, input={"goal": state.goal}, quality={"min_score": 0.80}),
+                 # 角色/场景资产：档案里已有用户给的参考图时会直接复用（provider 侧保证不覆盖）
+                 Task(ACTION_GENERATE_CHARACTER,
+                      input={"prompt": p.get("title") or state.goal},
+                      constraints={"style": style, "asset_key": char_key}),
+                 Task(ACTION_GENERATE_SCENE,
+                      input={"prompt": p.get("title") or state.goal},
+                      constraints={"style": style, "scene_key": scene_key})]
+        keys: list[str] = []
+        for i, s in enumerate(shots, 1):
+            cons = {"character": char_key, "scene": scene_key, "style": style, "continuity": True}
+            if not s.get("cast"):
+                cons["cast"] = "none"          # 空镜：判据不查角色（否则必然判"角色不符"）
+            keys.append(f"shot#{i}")
+            tasks.append(Task(ACTION_GENERATE_SHOT,
+                              input={"prompt": s["prompt"], "duration": s.get("duration", 5.0)},
+                              constraints=cons, quality={"min_score": 0.80}))
+        tasks.append(Task(ACTION_COMPOSE,
+                          input={"shots": keys, "output": "final.mp4",
+                                 "narration": p.get("narration") or "",
+                                 "sfx": p.get("sfx") or ""}))
+        self._queue = tasks
+        state.log(f"📜 照剧本执行：{len(shots)} 个镜头（剧本总时长 {p.get('total_duration')}s）"
+                  + ("，含旁白" if p.get("narration") else "")
+                  + ("，含音效" if p.get("sfx") else ""))
 
 
 class MockPlanner(Planner):
@@ -330,6 +386,15 @@ def make_planner(state: ExecutionState, brain=None, project=None) -> Planner:
     forced = os.environ.get("HXMV_PLANNER", "").strip().lower()
     if forced == "mock":
         return MockPlanner(brain, project)
+    # 剧本优先：用户贴了分镜剧本 → 照剧本拆镜头（LLM 会重排，实测镜数/内容都对不上）
+    if not forced:
+        plan = script.parse(state.goal)
+        if plan and len(plan.get("shots") or []) >= 2:
+            chars = list(project.characters) if project else []
+            for s in plan["shots"]:
+                s["cast"] = script.guess_cast(s["prompt"], chars)
+            state.log(f"📜 检测到分镜剧本：{len(plan['shots'])} 个镜头 → 照剧本执行")
+            return ScriptPlanner(state.goal, plan, brain, project)
     if forced in ("llm", "auto") or not forced:
         pass
     else:

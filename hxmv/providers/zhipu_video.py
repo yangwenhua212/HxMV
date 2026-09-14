@@ -208,6 +208,14 @@ class ZhipuVideoProvider(VideoProvider):
         key = str(task.constraints.get("asset_key") or task.constraints.get("scene_key") or task.task_id)
         desc = self._describe(str(task.input.get("prompt") or "").strip(), kind)
         prompt = self._asset_prompt(task, kind, desc)
+        # 档案里已有**用户自己传的**参考图（非占位色卡、非系统设定表）→ 直接复用，绝不覆盖。
+        # 实测踩过：系统自己又生成一张，把用户登记的那张顶掉了 —— 出的片子自然和用户给的无关。
+        if self.project:
+            have = self.project.asset(kind, key)
+            if have and not have.get("placeholder") and not have.get("sheet"):
+                return {"asset": have["path"], "asset_key": key, "kind": kind,
+                        "reused": True, "user_ref": True, "cost_units": 0.0}
+
         fp = fingerprint({"prompt": f"asset|{kind}|{key}|{prompt}", "model": IMAGE_MODEL})
         if self.project:
             hit = self.project.shot(fp)

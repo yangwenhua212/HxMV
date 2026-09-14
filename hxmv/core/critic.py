@@ -121,8 +121,8 @@ class L1PhysicsCritic(Critic):
         target = result.get("media") if task.action == ACTION_GENERATE_SHOT else result.get("output")
         # 成片的时长预期 = **各镜头时长之和**。不给的话会拿默认值去比 →
         # 两个 5 秒镜头拼出来的 10 秒成片被判 too_long，反复 RETRY 到最后 FAIL（实测踩过）。
-        expect = task.input.get("duration")
-        if task.action == ACTION_COMPOSE:
+        expect = result.get("expected_duration") or task.input.get("duration")
+        if task.action == ACTION_COMPOSE and not result.get("expected_duration"):
             # 成片的时长预期**只能来自镜头时长之和**：任务上带的 duration（规划器会顺手填 5 秒）
             # 不是成片的预期时长——两个 5 秒镜头拼出来的 10.2 秒成片会因此反复判 too_long，
             # 而 trim_duration 对"拼接"没有落点（改的只是任务上的 5→4），重试到终态 FAIL、
@@ -183,13 +183,18 @@ class L2VisualCritic(Critic):
         if verdict is not None:
             return verdict
 
+        no_cast = self._no_cast(task)
+        if no_cast and str(result.get("reference_kind") or "").lower() != "scene":
+            return QualityReport(layer=self.layer,
+                                 detail="空镜（本镜头无主角）：不做角色一致性判定")
         if consistency is not None:
             thr = probe.THRESHOLDS["min_consistency"]
             detail = f"与参考图外观一致度 {consistency:.3f}（阈值 {thr}）· 未做身份检查（无视觉模型）"
             if consistency >= thr:
                 return QualityReport(layer=self.layer, score=consistency, detail=detail)
-            defect = ("character_inconsistency" if "character" in task.constraints
-                      else "scene_inconsistency")
+            defect = ("scene_inconsistency" if no_cast
+                      else ("character_inconsistency" if "character" in task.constraints
+                            else "scene_inconsistency"))
             return QualityReport(layer=self.layer, score=consistency,
                                  failures=[defect],
                                  suggestions=[DEFECT_FIXES[defect][0]], detail=detail)
@@ -197,6 +202,20 @@ class L2VisualCritic(Critic):
         visual = [d for d in result.get("defects", [])
                   if d in ("character_inconsistency", "scene_inconsistency")]
         return self._report(visual)
+
+    @staticmethod
+    def _no_cast(task: Task) -> bool:
+        """这个镜头本来就没有主角（空镜：风景/海面/物件特写）。
+
+        为什么必须分流（实测踩过）：项目里登记了角色参考后，**每个**镜头都被拿去比角色 →
+        开场那种大海/云山/石头的空镜必然判「角色不符」→ 反复 RETRY 到终态失败，
+        白跑 30+ 次（0 元但白等）。判据要按镜头性质走：没有主角的镜头不查角色。
+        """
+        for src in (task.constraints, task.input):
+            v = str(src.get("cast") or "").strip().lower()
+            if v in ("none", "empty", "no_character", "无", "空镜", "nochar"):
+                return True
+        return False
 
     def _identity_review(self, task: Task, result: dict, media: str, ref: str) -> QualityReport | None:
         """真帧 + 参考图交给视觉模型判身份。不可用/失败返回 None（调用方退回像素路径）。"""
@@ -211,8 +230,12 @@ class L2VisualCritic(Critic):
             # 只问"给了参考的那一类"：只有角色参考图时去问场景，会得到"场景不一致"——
             # 而它根本没有场景参考，修无可修（真 AI 视频实测：换成下雪背景就被判死）。
             kind = str(result.get("reference_kind") or "").lower()
-            ask_char = kind != "scene"
+            ask_char = kind != "scene" and not self._no_cast(task)
             ask_scene = (kind == "scene") or not kind
+            if self._no_cast(task) and not ask_scene:
+                # 空镜 + 没有场景参考：没有任何可比的一致性基准 → 这条检查整体跳过
+                return QualityReport(layer=self.layer,
+                                     detail="空镜（本镜头无主角）：不做角色一致性判定")
             text = f"第一张图 = 基准参考；后面 {len(frames)} 张 = 本镜头实际画面（按时间顺序）。"
             if ask_char and not ask_scene:
                 text += "参考是**角色**基准：只判断主体是不是同一个角色（场景是否相同不用管）。"
