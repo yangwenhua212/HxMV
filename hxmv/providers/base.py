@@ -11,6 +11,14 @@
 from __future__ import annotations
 
 import abc
+import threading
+
+# 产物目录里的**共享路径**（参考图基线帧 `base_<w>x<h>_<stem>.png` 之类）由所有 provider 共用这一把锁。
+# 为什么必须跨 provider 共用：local_render 与 zhipu_video 会写**同名同路径**的基线帧
+# （真 AI 也需要"同编码管线基线"来消掉压缩差异），各持一把锁等于没锁——
+# 两个 provider 的并发任务照样会同时渲染、同时写同一个文件（写出坏 PNG，
+# 下游表现成"参考图读不出来"，很难定位到这里）。
+SHARED_FILE_LOCK = threading.Lock()
 
 
 class ProviderError(Exception):
