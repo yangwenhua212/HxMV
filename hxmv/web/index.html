@@ -963,7 +963,9 @@ async function quickAddMaterials(files) {
 function paintQuickArt(pid, keys) {
   const box = $("quickArt");
   box.hidden = !keys.length;
-  box.innerHTML = keys.map(k => `<img alt="" src="${withToken("/api/ref/image?project="
+  // onerror 隐藏：这张图可能随后在「参考图」里被注销、或同名 key 被改登记成场景图
+  // （档案里同名 key 只归一类）——那时缩略图会变成破图，不如隐藏
+  box.innerHTML = keys.map(k => `<img alt="" onerror="this.style.display='none'" src="${withToken("/api/ref/image?project="
     + encodeURIComponent(pid) + "&kind=character&key=" + encodeURIComponent(k))}">`).join("")
     + (keys.length ? `<span class="qa-tip">已作为角色参考 · 想换成场景图或调裁切，点上面的「角色一致性」</span>` : "");
 }
@@ -979,7 +981,7 @@ const PILL_ACTS = {
   img2video: openRef,
   multi: () => { $("ideaInput").value = "一个小猴子在花果山翻跟头，多镜头一镜到底，5 秒"; $("ideaInput").focus(); },
   character: openRef,
-  project: () => { $("sessionTitle") && ($("sessionTitle").textContent = "续做同一部：先填项目名"); showPage("session"); },
+  project: () => { showPage("session"); $("projectInput").focus(); chatHint("续做同一部：先填项目名，它就会接着上一部做"); },
 };
 document.querySelectorAll("#pillList .pill").forEach(b => {
   b.onclick = () => { const fn = PILL_ACTS[b.dataset.act]; if (fn) fn(); };

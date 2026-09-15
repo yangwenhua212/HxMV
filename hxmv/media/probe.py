@@ -253,10 +253,9 @@ def measure_freeze_seconds(path: str) -> float | None:
 def measure_black_freeze_loudness(path: str,
                                   duration: float | None = None
                                   ) -> tuple[float | None, float | None, float | None]:
-    """**一次解码**同时量出：黑屏时长 / 静止时长 / 平均音量。
+    """只取黑帧 / 静止 / 平均音量三个指标——**一次解码量全部**的实现在 `measure_all`。
 
-    三次探针各解一遍视频是纯浪费（1080p 上很贵）——三个都是元数据类 filter，
-    合成一条链跑一遍即可。返回 (black_seconds, freeze_seconds, mean_volume_db)。
+    返回 (black_seconds, freeze_seconds, mean_volume_db)；不是真媒体 / 没有 ffmpeg 时全为 None。
 
     n=0.002 是静止检测的噪声容差，按实测标定：真静止（帧完全重复，差值≈0）必抓，
     慢速推镜（差值 ~0.0015）不误报；调大就会漏掉真静止。
@@ -264,55 +263,38 @@ def measure_black_freeze_loudness(path: str,
     duration 用于收尾：片段\"一直静止到结尾\"时 freezedetect 只报 freeze_start，
     没有 freeze_end——不补上就会漏掉这类（最常见的）静止缺陷。
     """
-    if not has_ffmpeg() or not is_media_file(path):
+    m = measure_all(path, duration)
+    if not m:
         return None, None, None
-    vf = (f"blackdetect=d={THRESHOLDS['black_seconds']}:pix_th=0.10,"
-          f"freezedetect=n=0.002:d=1.2")
-    rc, out = _run(["ffmpeg", "-hide_banner", "-i", path, "-vf", vf,
-                    "-af", "volumedetect", "-f", "null", "-"])
-
-    black = sum(float(x) for x in re.findall(r"black_duration:([\d.]+)", out))
-    if re.search(r"black_start:([\d.]+)\s*$", out, flags=re.M) and duration:
-        last_black = float(re.findall(r"black_start:([\d.]+)", out)[-1])
-        if last_black and "black_end" not in out.split(f"black_start:{last_black}")[-1]:
-            black += max(0.0, duration - last_black)
-
-    freeze, last = 0.0, None
-    for line in out.splitlines():
-        m = re.search(r"freeze_(start|end):\s*([\d.]+)", line)
-        if not m:
-            continue
-        if m.group(1) == "start":
-            last = float(m.group(2))
-        elif last is not None:
-            freeze += max(0.0, float(m.group(2)) - last)
-            last = None
-    if last is not None and duration:      # 静止一直到片尾
-        freeze += max(0.0, duration - last)
-
-    mv = re.search(r"mean_volume:\s*(-?[\d.]+)\s*dB", out)
-    return round(black, 3), round(freeze, 3), (float(mv.group(1)) if mv else None)
+    return m["black_seconds"], m["freeze_seconds"], m["mean_volume_db"]
 
 
-def measure_extended(path: str, duration: float | None = None) -> dict:
-    """一次解码量出：画面模糊度 / 镜头切换次数 / EBU R128 响度 / 静音段占比。
+def measure_all(path: str, duration: float | None = None) -> dict:
+    """**一次解码**量出全部指标：黑帧 / 静止 / 平均音量 / 模糊度 / 镜头切换 / 响度 / 静音段。
 
-    为什么不并进 measure_black_freeze_loudness：那条链的阈值已经标定过，
-    再塞进 loudnorm（会归一化音频）与 blurdetect（依赖缩放与内容尺度）会互相影响，
-    既有标定全部作废。新指标独立成链，代价是多一次解码——值得。
+    为什么全部合成一条链：这些都是**分析型**滤镜——blurdetect / freezedetect / blackdetect /
+    scdet 只读画面、不改画面；volumedetect / silencedetect 排在 loudnorm 之前，看到的是原始信号。
 
-    三条实测坑（写在这里省得下次再踩）：
-    1. `metadata=print` 必须紧跟在**产生它的滤镜之后**。放在 scdet 之前时，
-       那一帧的 lavfi.scd.score 还没写上去，打印出来是空的（实测样本数 0）。
-    2. 极度模糊时 blurdetect 输出 `nan`（梯度分母为 0）。只抓数字的正则会把它
-       当成"没测到"→ 漏判最该抓的那一类糊。这里显式转成 blur_unmeasurable。
-    3. loudnorm 对**全静音**音轨输出 `-inf`；解析成 float 后是 -inf，不能直接当响度用，
-       要转成 None 并交给 silencedetect 的占比去判（否则会得出一条 -inf 的假指标）。
+    **别指望它明显提速（实测数字）**：1080p/5s 素材两趟 2.45s → 一趟 2.34s，只省约 5%。
+    瓶颈是滤镜本身的计算（blurdetect 逐帧算梯度），不是解码；合并省下的仅仅是
+    "多起一次 ffmpeg"的固定开销。真正的价值是**测量与解析只有一份**（原来两处各写一遍，
+    阈值含义还分散在两处注释里）。
+
+    四条实测约束（**别改顺序**）：
+    1. `metadata=print` 必须紧跟**产生它**的滤镜——blurdetect 与 scdet 各自后面放一个；
+       放在 scdet 之前时，那一帧的 lavfi.scd.score 还没写上去（实测样本数 0）。
+    2. loudnorm 放音频链**最后**：它会归一化响度，排前面会让后面的检测看到被改过的信号。
+    3. 片尾"未闭合"的段要用 duration 收尾（一直黑/一直静止到结尾时只有 start，没有 end）。
+    4. 极度模糊时 blurdetect 输出 `nan`（梯度分母为 0）。只抓数字的正则会把它当成
+       "没测到"→ 漏判最该抓的那类糊；这里显式转成 blur_unmeasurable。
     """
     if not has_ffmpeg() or not is_media_file(path):
         return {}
     t = THRESHOLDS
-    vf = (f"blurdetect=low=0.1:high=0.5,metadata=mode=print:key=lavfi.blur,"
+    vf = (f"blackdetect=d={t['black_seconds']}:pix_th=0.10,"
+          f"freezedetect=n=0.002:d=1.2,"
+          f"blurdetect=low=0.1:high=0.5,"
+          f"metadata=mode=print:key=lavfi.blur,"
           f"scdet=threshold={t['scene_cut_score']},"
           f"metadata=mode=print:key=lavfi.scd.score")
     # 顺序有讲究：volumedetect/silencedetect 要先看**原始**信号，loudnorm 放最后
@@ -367,7 +349,32 @@ def measure_extended(path: str, duration: float | None = None) -> dict:
     if last is not None and duration:      # 一直静音到片尾
         silence += max(0.0, duration - last)
 
+    # ---- 黑帧：累计时长（片尾未闭合要补上） ----
+    black = sum(float(x) for x in re.findall(r"black_duration:([\d.]+)", out))
+    if re.search(r"black_start:([\d.]+)\s*$", out, flags=re.M) and duration:
+        last_black = float(re.findall(r"black_start:([\d.]+)", out)[-1])
+        if last_black and "black_end" not in out.split(f"black_start:{last_black}")[-1]:
+            black += max(0.0, duration - last_black)
+
+    # ---- 静止：同样可能在片尾未闭合（原来这条在另一趟解码里，现在合并） ----
+    freeze, last_freeze = 0.0, None
+    for line in out.splitlines():
+        m = re.search(r"freeze_(start|end):\s*([\d.]+)", line)
+        if not m:
+            continue
+        if m.group(1) == "start":
+            last_freeze = float(m.group(2))
+        elif last_freeze is not None:
+            freeze += max(0.0, float(m.group(2)) - last_freeze)
+            last_freeze = None
+    if last_freeze is not None and duration:   # 静止一直到片尾
+        freeze += max(0.0, duration - last_freeze)
+
+    mv = re.search(r"mean_volume:\s*(-?[\d.]+)\s*dB", out)
     return {
+        "black_seconds": round(black, 3),
+        "freeze_seconds": round(freeze, 3),
+        "mean_volume_db": float(mv.group(1)) if mv else None,
         "blur_mean": blur_mean,
         "blur_max": blur_max,
         "scene_cuts": cuts,
@@ -375,6 +382,13 @@ def measure_extended(path: str, duration: float | None = None) -> dict:
         "silence_seconds": round(silence, 3),
         "silence_ratio": round(silence / duration, 3) if duration else None,
     }
+
+
+def measure_extended(path: str, duration: float | None = None) -> dict:
+    """（兼容包装）只取扩展指标——真正的测量在 `measure_all`（一次解码量全部）。"""
+    m = measure_all(path, duration)
+    return ({k: m.get(k) for k in ("blur_mean", "blur_max", "scene_cuts", "lufs",
+                                   "silence_seconds", "silence_ratio")} if m else {})
 
 
 def leading_black_seconds(path: str) -> float:
@@ -547,12 +561,8 @@ def inspect(path: str | None, expect_duration: float | None = None,
     m = dict(container)
     m["path"] = str(path)
     m["size_bytes"] = os.path.getsize(str(path))
-    black, freeze, vol = measure_black_freeze_loudness(str(path), container.get("duration"))
-    m["mean_volume_db"] = vol
-    m["black_seconds"] = black
-    m["freeze_seconds"] = freeze
-    # 第二趟量扩展判据（模糊/切换/响度/静音占比）——独立一条链，不动上面已标定的那条
-    m.update(measure_extended(str(path), container.get("duration")))
+    # **一次解码**量全部指标（黑帧/静止/音量/模糊/切换/响度/静音段）——原来分两趟，白多解一遍
+    m.update(measure_all(str(path), container.get("duration")))
     m["defects"] = detect_defects(m, expect_duration, expect_audio, expect_single_shot)
     return m
 

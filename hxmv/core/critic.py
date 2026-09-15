@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from ..media import probe
@@ -367,6 +368,10 @@ class PipelineCritic:
         self.layers: list[Critic] = [L1PhysicsCritic(), L2VisualCritic(), L3SemanticCritic()]
         self._cache_key: tuple | None = None
         self._cache: list[QualityReport] = []
+        # 缓存加锁：目前只有主线程调评审（批内并行只并行"执行"，判定仍串行），
+        # 但 _run_layers 自己开了线程池——将来若有人在批内直接调评审，这行锁能挡住
+        # "两个线程同时写 _cache_key/_cache"导致的报告串台（比崩掉更难查）。
+        self._lock = threading.Lock()
 
     def evaluate_layers(self, task: Task, result: dict) -> list[QualityReport]:
         """逐层评估，返回每层独立报告（客户端/面板展示分层分数用）。
@@ -376,10 +381,11 @@ class PipelineCritic:
         VLM 可能给出与判定不一致的分层分数）。这里按 (任务, attempt, result 实例) 记住结果。
         """
         key = (task.task_id, task.retry_policy.get("attempts"), id(result))
-        if key != self._cache_key:
-            self._cache = self._run_layers(task, result)
-            self._cache_key = key
-        return self._cache
+        with self._lock:
+            if key != self._cache_key:
+                self._cache = self._run_layers(task, result)
+                self._cache_key = key
+            return self._cache
 
     def _run_layers(self, task: Task, result: dict) -> list[QualityReport]:
         """三层并行执行，返回顺序固定为 [L1, L2, L3]。

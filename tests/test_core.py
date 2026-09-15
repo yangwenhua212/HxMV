@@ -463,5 +463,89 @@ class BatchExecutionTest(unittest.TestCase):
         self.assertIsNone(ProviderExecutor(_Safe()).for_concurrent())
 
 
+# ------------------------------------------- 跨 provider 共享路径的并发安全（v0.8）
+class SharedPathConcurrencyTest(unittest.TestCase):
+    """`base_<w>x<h>_<stem>.png` 这类基线帧，local_render 与 zhipu_video 会写**同名同路径**。
+
+    各持一把锁等于没锁：两个 provider 的并发任务照样会同时渲染、同时写同一个文件
+    （写出坏 PNG，下游表现成"参考图读不出来"，很难定位）。所以断言两件事：
+    ① 两边用的是**同一把锁**；② 8 线程并发要同一张基线帧时，产物仍是有效图片。
+    """
+
+    def test_both_providers_share_the_same_lock(self):
+        from hxmv.providers import base, local_render, zhipu_video
+        self.assertIs(local_render._FILE_LOCK, base.SHARED_FILE_LOCK)
+        self.assertIs(zhipu_video.SHARED_FILE_LOCK, base.SHARED_FILE_LOCK)
+
+    def test_concurrent_local_render_shares_asset_and_baseline(self):
+        """真跑 ffmpeg：4 个并发任务要同一张参考图与同一条基线帧。
+
+        不共享锁时这里会出两种事故：同一路径被并发写（坏 PNG，探不到宽高），
+        或者临时文件 `_basetmp_*` 被另一个线程删掉导致渲染失败。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from hxmv.providers.local_render import LocalRenderProvider
+
+        if not probe.has_ffmpeg():
+            self.skipTest("没有 ffmpeg")
+        tmp = tempfile.mkdtemp(prefix="hxmv_par_")
+        try:
+            provider = LocalRenderProvider(outdir=tmp)      # project=None → 不走档案复用
+            assets: list[str] = []
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(lambda _: assets.append(provider._render_asset(None, "cat", "character")),
+                              range(4)))
+            self.assertEqual(len(set(assets)), 1, "同一 key 应产出同一个资产路径")
+            info = probe.probe_container(assets[0])
+            self.assertEqual((info.get("width"), info.get("height")), (640, 360), "资产图被并发写坏")
+
+            baselines: list[str] = []
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(lambda _: baselines.append(provider._baseline_frame(assets[0], 640, 360)),
+                              range(4)))
+            self.assertEqual(len(set(baselines)), 1, "同一参考+分辨率应复用同一条基线帧")
+            base = probe.probe_container(baselines[0])
+            self.assertEqual((base.get("width"), base.get("height")), (640, 360), "基线帧被并发写坏")
+            # 临时文件不应残留（并发下最容易漏删或互相删）
+            self.assertEqual([n for n in os.listdir(tmp) if n.startswith("_basetmp_")], [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_concurrent_encoded_frame_yields_valid_png(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from hxmv.providers.zhipu_video import _encoded_frame
+
+        if not probe.has_ffmpeg():
+            self.skipTest("没有 ffmpeg")
+        tmp = tempfile.mkdtemp(prefix="hxmv_lock_")
+        try:
+            ref = os.path.join(tmp, "ref.png")
+            rc, _ = probe._run([probe.ffmpeg_path("ffmpeg"), "-y", "-v", "error", "-f", "lavfi",
+                                "-i", "testsrc2=s=640x360:d=1", "-frames:v", "1", ref], timeout=60)
+            if rc != 0 or not os.path.isfile(ref):
+                self.skipTest("参考图生成失败")
+
+            results: list[str | None] = []
+            guard = threading.Lock()
+
+            def work():
+                got = _encoded_frame(ref, 320, 180, tmp)
+                with guard:
+                    results.append(got)
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda _: work(), range(8)))
+
+            paths = [p for p in results if p]
+            self.assertEqual(len(paths), 8, "有线程拿不到基线帧")
+            self.assertEqual(len(set(paths)), 1, "同一份输入应当复用同一个文件")
+            # 关键断言：并发写坏的 PNG 在这里会暴露（探不到宽高）
+            info = probe.probe_container(paths[0])
+            self.assertTrue(info, "基线帧不是可读的有效图片（并发写坏了）")
+            self.assertEqual((info.get("width"), info.get("height")), (320, 180))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

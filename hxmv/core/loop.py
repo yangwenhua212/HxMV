@@ -99,6 +99,13 @@ def _execute_batch(executor, tasks: list, state, emit, verbose: bool,
         return {task.task_id: _execute_one(executor, task, state, emit, verbose,
                                           max_infra, budget_lock)}
 
+    if not executor.parallel_safe:
+        # 防御：loop 组批时已经检查过，但这是公共入口——真拿一个不支持并发的 executor
+        # 硬开线程池，等于让多线程共用一个带实例状态的 provider（缓存/产物路径互相踩）。
+        state.log("⚠ executor 未声明并行安全 → 本批退回串行")
+        return {t.task_id: _execute_one(executor, t, state, emit, verbose, max_infra, budget_lock)
+                for t in tasks}
+
     state.log(f"⚡ 并行执行 {len(tasks)} 个互相独立的镜头（并行度 {len(tasks)}）")
     out: dict = {}
 
@@ -414,6 +421,12 @@ def run(goal: str,
             _emit(ev)
 
         if infra_aborted:
+            # 组批时试探取出、还没来得及执行的任务：它们停在 PENDING，
+            # 不标记的话 run 结束后状态是"既没完成也没失败"（客户端会当成还在跑）。
+            for t in peeked:
+                t.status = TaskStatus.SKIPPED
+            if peeked:
+                state.log(f"  （{len(peeked)} 个任务未轮到执行，已标记为跳过）")
             break
 
     state.phase = "DONE"

@@ -28,7 +28,7 @@ import urllib.request
 from .. import USER_AGENT
 from ..core import config
 from ..media import probe
-from .base import ProviderError, VideoProvider
+from .base import SHARED_FILE_LOCK, ProviderError, VideoProvider
 
 DEFAULT_BASE = "https://open.bigmodel.cn/api/paas/v4"
 # 内部语义分辨率 → 智谱合法 size（flash 免费且支持到 4K，统一给 16:9 高清，避免给非法枚举）
@@ -64,18 +64,24 @@ def _encoded_frame(image: str, w: int | None, hgt: int | None, outdir: str) -> s
     path = os.path.join(outdir, f"base_{w}x{hgt}_{stem}.png")
     if os.path.exists(path):
         return path
-    tmp = os.path.join(outdir, f"_basetmp_{w}x{hgt}_{stem}.mp4")
-    rc, _ = probe._run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-loop", "1",
-                        "-i", image, "-frames:v", "1", "-vf", f"scale={w}:{hgt},format=yuv420p",
-                        *probe.encoder_args(26), tmp])
-    if rc != 0:
-        return None
-    rc, _ = probe._run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                        "-i", tmp, "-frames:v", "1", path])
-    try:
-        os.remove(tmp)
-    except OSError:
-        pass
+    # 与 local_render 共用同一把锁（SHARED_FILE_LOCK）：这条路径和那边**同名**，
+    # 两个并发镜头会同时判定"文件不存在"、同时渲染、同时写同一个文件。
+    # 锁必须覆盖"检查"那一刻，只在写的时候加锁挡不住 check-then-act。
+    with SHARED_FILE_LOCK:
+        if os.path.exists(path):
+            return path
+        tmp = os.path.join(outdir, f"_basetmp_{w}x{hgt}_{stem}.mp4")
+        rc, _ = probe._run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-loop", "1",
+                            "-i", image, "-frames:v", "1", "-vf", f"scale={w}:{hgt},format=yuv420p",
+                            *probe.encoder_args(26), tmp])
+        if rc != 0:
+            return None
+        rc, _ = probe._run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                            "-i", tmp, "-frames:v", "1", path])
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
     return path if rc == 0 and os.path.isfile(path) else None
 
 

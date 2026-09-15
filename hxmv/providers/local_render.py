@@ -29,11 +29,10 @@ import hashlib
 import os
 import random
 import sys
-import threading
 import time
 
 from ..media import probe
-from .base import ProviderError, VideoProvider
+from .base import SHARED_FILE_LOCK, ProviderError, VideoProvider
 from ..core.project import Project, fingerprint, fp_params
 
 # 低端生成器基线（低于 L1 阈值 → 首轮必然被量出真实缺陷）
@@ -54,7 +53,7 @@ BLACK_HEAD_SECONDS = 0.3  # 片头全黑段（未被 trim_black 修掉时真的�
 # 两个线程同时判定"文件不存在"→ 同时渲染 → 同时写同一个文件（可能写出坏文件，
 # 或者一个线程读到写了一半的 PNG）。锁必须覆盖"检查"那一刻——check-then-act
 # 的竞态就出在检查上；只在写的时候加锁是挡不住的。
-_FILE_LOCK = threading.Lock()
+_FILE_LOCK = SHARED_FILE_LOCK   # 与 zhipu_video 共用同一把（两者写的是同名基线帧）
 
 
 def font_file() -> str | None:
