@@ -44,7 +44,11 @@ def _prepare_env(provider: str, brain_path: str, projects_dir: str) -> None:
     os.environ["HXMV_BRAIN"] = brain_path
     os.environ["HXMV_PROJECTS"] = projects_dir
     os.environ["HXMV_PLANNER"] = "mock"          # 规划器锁死，分数才有可比性
-    os.environ["HXMV_PROVIDER"] = "" if provider == "mock" else provider
+    # 必须**显式**写 provider，不能写空值：空值会走 executor._auto_provider()，
+    # 本机一旦配了 Key 就落「真视频档」——所谓「mock 跑分」实际在烧真 API 配额，
+    # 数字与旧曲线也不可比（实测：4 轮 × 3500s/轮、通过率掉到 12~38%、产物目录里
+    # 全是带「AI生成」水印的真视频）。跑分的第一条纪律 = 跑的是它自己声明的那档。
+    os.environ["HXMV_PROVIDER"] = provider
     sys.path.insert(0, ROOT)
 
 
@@ -269,6 +273,16 @@ def main() -> int:
     from hxmv.core.project import Project, PROJECTS_DIR
 
     brain = Brain(args.brain)
+    # 防呆：跑分第一天条就是「跑的必须是自己声明的那一档」。环境变量被 _auto_provider()
+    # 接管过一次（mock 档实际落真 API），所以这里直接问执行器要答案，不对就拒跑。
+    from hxmv.core.executor import make_executor
+    actual = type(make_executor()).__name__
+    print(f"执行器自检：声明 {args.provider} ｜ 实际 {actual}")
+    if args.provider == "mock" and actual != "MockVideoExecutor":
+        print(f"✗ 跑分环境不对：要求 mock，实际 {actual}"
+              f"（HXMV_PROVIDER={os.environ.get('HXMV_PROVIDER')!r}）——先修环境再跑，"
+              f"否则测出来的不是 mock 曲线。")
+        return 2
     print(f"基准集：{len(goals)} 个目标 × {args.rounds} 轮 ｜ provider={args.provider} "
           f"｜ 大脑={args.brain}（{'空' if not brain.size else brain.stats()}）")
     rounds = []
