@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 
 from .. import USER_AGENT
-from ..core import config
+from ..core import camera, config
 from ..media import probe
 from .base import ProviderError, VideoProvider
 
@@ -81,6 +81,9 @@ def _encoded_frame(image: str, w: int | None, hgt: int | None, outdir: str) -> s
 
 class ZhipuVideoProvider(VideoProvider):
     name = "zhipu"
+    # 运镜落点（按档位不同，见 __init__）：flash 只能靠提示词；
+    # cogvideox-3 额外支持**首尾帧**——第一张作首帧、第二张作尾帧，运镜方向就被钉死了。
+    CAMERA_FIRST_LAST_MODELS = {"cogvideox-3"}
     # 每个任务的产物路径都带 task_id（keyframe_/shot_<task_id>），产物目录互不重叠；
     # 与智谱的全部交互都是无状态 HTTP → 多镜头可以并行提交+轮询（墙钟时间大幅下降）。
     parallel_safe = True
@@ -98,6 +101,10 @@ class ZhipuVideoProvider(VideoProvider):
         # 档位来源：HXMV_ZHIPU_MODEL 环境变量 → ~/.hxmv/config.json（面板设置页可切）
         self.model = config.option("zhipu", "video_model") or "cogvideox-flash"
         self.max_duration = MAX_DURATION.get(self.model, 5.0)   # 执行器据此钳制"要多久"
+        # 运镜落点：flash 只能写提示词；cogvideox-3 还能用首尾帧把方向钉死。
+        self.camera_support = {camera.CAP_PROMPT}
+        if self.model in self.CAMERA_FIRST_LAST_MODELS:
+            self.camera_support.add(camera.CAP_FIRST_LAST)
         self.timeout = float(os.environ.get("HXMV_ZHIPU_TIMEOUT", "420"))
         self.outdir = outdir or os.environ.get("HXMV_ARTIFACTS") or (
             os.path.join(project.dir, "artifacts") if project else
@@ -311,7 +318,7 @@ class ZhipuVideoProvider(VideoProvider):
                                        result={"asset": path, "kind": "keyframe", "prompt": still})
         return _data_url(path), path
 
-    def _submit(self, task, prompt: str, image: str | None) -> dict:
+    def _submit(self, task, prompt: str, image: str | list | None) -> dict:
         size = SIZE_MAP.get(str(task.input.get("resolution") or ""), "1920x1080")
         duration = int(task.input.get("duration") or 5)
         body = {"model": self.model, "prompt": prompt,
@@ -320,7 +327,9 @@ class ZhipuVideoProvider(VideoProvider):
                 "size": size, "fps": int(task.input.get("fps") or 30),
                 "duration": 10 if duration > 7 else 5}
         if image:
-            body["image_url"] = image      # 图生视频：首帧 = 项目档案里的角色/场景参考图
+            # 单张 = 首帧（锁一致性）；两张 = [首帧, 尾帧]（顺带把**运镜方向**钉死，
+            # 官方字段说明：第一张作首帧、第二张作尾帧，'模型将以此参数中传入的图片来生成视频'）
+            body["image_url"] = image
         return self._post("videos/generations", body)
 
     def _poll(self, task_id: str) -> dict:
@@ -424,8 +433,13 @@ class ZhipuVideoProvider(VideoProvider):
                     ref_path, image, ref_kind = hit["path"], _data_url(hit["path"]), kind
                     break
 
+        # 运镜落点先定、再算指纹：换了落点（提示词 vs 首尾帧）出来的画面不一样，
+        # 不进指纹就会命中缓存复用旧片 → "改了运镜却没变"（老坑，与 ref_kind 同因）。
+        camera_move = camera.normalize_move(cons.get("camera") or task.input.get("camera"))
+        camera_strategy = camera.pick_strategy(self, prefer_first_last=bool(camera_move))
         fp = fingerprint(fp_params(task, self.project, f"zhipu/{self.model}",
-                                   extra={"ref_kind": ref_kind}))
+                                   extra={"ref_kind": ref_kind,
+                                          "camera_realization": camera_strategy}))
         if self.project:
             hit = self.project.shot(fp)
             if hit:
@@ -444,7 +458,18 @@ class ZhipuVideoProvider(VideoProvider):
                 kf_url, kf_path = None, None
             if kf_url:
                 image, ref_path, ref_kind = kf_url, kf_path, "keyframe"
-        submitted = self._submit(task, prompt, image)
+        # 首尾帧锚定：模型支持时，用**派生尾帧**（从首帧按运镜方向裁/缩放出来）把运镜钉死。
+        # 只给一张首帧时运镜全靠模型心情；给两张图它必须从 A 走到 B —— 这是"硬运镜"的落点。
+        images: list = [image] if image else []
+        realization = "prompt"
+        if camera_strategy == camera.CAP_FIRST_LAST and camera_move and ref_path and image:
+            tail = camera.derive_last_frame(
+                ref_path, camera_move, os.path.join(self.outdir, f"tail_{task.task_id}.jpg"),
+                amount=cons.get("camera_amount"))
+            if tail:
+                images = [image, _data_url(tail)]
+                realization = "first_last"
+        submitted = self._submit(task, prompt, images)
         task_id = submitted.get("id") or submitted.get("request_id")
         if not task_id:
             raise ProviderError(f"提交未返回任务 id: {json.dumps(submitted, ensure_ascii=False)[:200]}",
@@ -472,6 +497,10 @@ class ZhipuVideoProvider(VideoProvider):
             "resolution": f"{cont.get('width')}x{cont.get('height')}" if cont.get("width") else None,
             "params": {"provider": self.name, "model": self.model, "task_id": str(task_id),
                        "prompt": prompt[:200], "image_to_video": bool(image),
+                       "image_count": len(images), "camera": camera_move,
+                       "camera_speed": cons.get("camera_speed"),
+                       "camera_amount": cons.get("camera_amount"),
+                       "camera_realization": realization,
                        "reference_strength": cons.get("reference_strength")},
             "reused": False, "fingerprint": fp,
             "cost_units": self.estimate_cost(task.action),
@@ -535,10 +564,20 @@ class ZhipuVideoProvider(VideoProvider):
         scene_desc = self._project_desc("scene", cons.get("scene"))
         if scene_desc:
             parts.append(f"the setting must be exactly this: {scene_desc}")
-        # 运动基线：智谱视频 API 没有运动参数落点（_PROJECTION 把 motion_scale 投影过去也没有字段接），
-        # 唯一能控运动的杠杆就是提示词本身 —— 实测 frozen_frame 反反复复修不掉就是在这里断的。
+        # 运动基线：智谱视频 API **没有**运镜参数落点（字段只有 model/prompt/image_url/
+        # quality/with_audio/size/duration/fps）→ 提示词是唯一能控运镜的杠杆；
+        # 另有**首尾帧**（cogvideox-3 专属）可把方向钉死，见 `camera_support`/generate。
         parts.append("the subject is clearly moving through the whole shot: the action progresses, "
-                     "this is not a still image; add gentle camera movement (slow push-in)")
+                     "this is not a still image")
+        move = camera.normalize_move(cons.get("camera") or inp.get("camera"))
+        speed = str(cons.get("camera_speed") or inp.get("camera_speed") or camera.DEFAULT_SPEED)
+        if move:
+            parts.append(camera.phrase(move, speed, cons.get("camera_amount")))
+        else:
+            parts.append("camera work: gentle, steady movement, one continuous take")
+        if inp.get("_guard_camera"):
+            # 「运镜不符」的修正落点：把方向/节奏写死（这条真的改了提示词，不是空转）
+            parts.append("the camera movement must match the described direction and pace exactly")
         try:
             motion = float(cons.get("motion_scale") or inp.get("motion_scale") or 0)
         except (TypeError, ValueError):

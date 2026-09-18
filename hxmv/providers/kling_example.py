@@ -21,6 +21,8 @@ import urllib.request
 
 from .base import ProviderError, VideoProvider
 
+from ..core import camera
+
 KLING_API = os.environ.get("HXMV_KLING_API", "https://api.klingai.com/v1/videos")
 TEXT_TO_VIDEO_MODEL = "kling-v1"   # TODO: 换成你账号可用的模型
 
@@ -35,6 +37,9 @@ class KlingStyleProvider(VideoProvider):
 
     name = "kling"
     action_map = ACTION_TO_ENDPOINT
+    # 运镜落点：可灵有**原生** camera_control（simple 下六轴）→ 最硬的一档。
+    # 声明它是诚实的：适配器一旦接通，运镜就走原生参数（提示词只作补充）。
+    camera_support = {camera.CAP_NATIVE, camera.CAP_PROMPT}
 
     def __init__(self, project=None):
         self.api_key = os.environ.get("HXMV_KLING_KEY", "")
@@ -50,7 +55,7 @@ class KlingStyleProvider(VideoProvider):
         prompt = task.input.get("prompt", "")
         if task.constraints.get("semantic_guard"):
             prompt += "。（严格贴合分镜描述，不添加未描述元素）"
-        return {
+        req = {
             "model_name": TEXT_TO_VIDEO_MODEL,
             "prompt": prompt,
             "duration": str(duration),
@@ -59,6 +64,15 @@ class KlingStyleProvider(VideoProvider):
             # TODO: 角色参考图/首尾帧（一致性真正的抓手）：
             #   "image_tail": [{"id": asset_ref}],  # 来自 Asset Manager
         }
+        # 运镜：可灵有**原生**镜头控制（比提示词硬得多）——内核语义 → camera_control 的投影。
+        # 这正是"换成更强的模型，运镜自动升级"的那一处落点：本文件之外一个字都不用改。
+        # 官方形状：{"type": "simple", "config": {horizontal/vertical/pan/tilt/roll/zoom: -1..1}}
+        move = camera.normalize_move(task.constraints.get("camera") or task.input.get("camera"))
+        if move and move != camera.MOVE_STATIC:
+            req["camera_control"] = camera.native_params(
+                move, task.constraints.get("camera_speed"),
+                task.constraints.get("camera_amount"))
+        return req
 
     # ---- 任务 2：轮询直到出片 ----
     def _poll(self, task_id: str, timeout_s: int = 180) -> dict:

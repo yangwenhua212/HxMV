@@ -12,11 +12,13 @@ import os
 import json
 import re
 
+from . import camera
 from . import llm
 from . import script
+from . import story
 from .state import (
     ACTION_COMPOSE, ACTION_GENERATE_CHARACTER, ACTION_GENERATE_SCENE,
-    ACTION_GENERATE_SHOT, ACTION_STORYBOARD, ExecutionState, Task,
+    ACTION_GENERATE_SHOT, ACTION_STORYBOARD, ExecutionState, Task, TaskStatus,
 )
 
 
@@ -87,6 +89,90 @@ def _first_scene_prompt(goal: str) -> str:
     return m.group(1) if m else goal
 
 
+def tasks_from_plan(plan: dict, state: ExecutionState, project=None, source: str = "分镜",
+                    include_storyboard: bool = True) -> list[Task]:
+    """分镜 → 结构化任务数组。**两条来源共用这一条路**：用户贴的剧本、HxMV 自己写的剧本。
+
+    为什么共用：多一条岔路就多一处"只有那条路才有"的 bug（历史教训：剧本路径有空的镜头、
+    LLM 路径漏 constraints.character）。这里把分镜的所有字段一次落到任务上：
+    场次键、角色键、运镜规格（camera/camera_speed/camera_amount）、空镜标记（cast=none）。
+
+    `include_storyboard=False`：分镜**已经**由上游产出（编剧规划器先跑了 STORYBOARD 任务）——
+    这里再加一个就会跑两遍分镜（实测：一次 run 出现两个 STORYBOARD，白花一次模型调用）。
+    """
+    chars = list(project.characters) if project else []
+    scenes = list(project.scenes) if project else []
+    style = project.style if project else "cinematic"
+    default_char = chars[0] if chars else "主角"
+    default_scene = scenes[0] if scenes else "场景"
+    shots = list(plan.get("shots") or [])
+
+    # 场次 / 角色：按分镜里**真实用到的键**各出一个资产任务（多场景多角色才有多张参考图可用）。
+    # 只用一个默认键的话，"换场景"就只能靠文字，模型会把上一场的背景搬过来（实测踩过）。
+    used_scenes: list[str] = []
+    used_cast: list[str] = []
+    for s in shots:
+        key = str(s.get("scene") or default_scene)
+        if key not in used_scenes:
+            used_scenes.append(key)
+        for c in (s.get("cast") or []):
+            c = str(c)
+            if c and c not in used_cast:
+                used_cast.append(c)
+    if not used_cast:
+        used_cast = [default_char]
+
+    title = str(plan.get("title") or "").strip() or state.goal
+    tasks: list[Task] = []
+    if include_storyboard:
+        # 分镜任务：把"这次拍什么"落成产物（面板能看到分镜，判据有据可查）。
+        # 带 plan 的（用户剧本）**不调模型**；offline 的（mock/基准集）用确定性兜底。
+        tasks.append(Task(ACTION_STORYBOARD, input={"goal": state.goal, **(
+            {"plan": plan} if plan.get("written_by") == "user" else
+            {"offline": True} if plan.get("written_by") == "fallback" else {})},
+            quality={"min_score": 0.0}))
+    for key in used_cast:
+        tasks.append(Task(ACTION_GENERATE_CHARACTER,
+                          input={"prompt": title},
+                          constraints={"style": style, "asset_key": key}))
+    for key in used_scenes:
+        tasks.append(Task(ACTION_GENERATE_SCENE,
+                          input={"prompt": title},
+                          constraints={"style": style, "scene_key": key}))
+
+    keys: list[str] = []
+    scene_per_shot: list[str] = []
+    for i, s in enumerate(shots, 1):
+        scene_key = str(s.get("scene") or default_scene)
+        cast = [str(c) for c in (s.get("cast") or [])]
+        cons = {"character": cast[0] if cast else default_char,
+                "scene": scene_key, "style": style, "continuity": True}
+        if not cast:
+            cons["cast"] = "none"          # 空镜：判据不查角色（否则必然判"角色不符"）
+        move = camera.normalize_move(s.get("camera"))
+        if move:
+            cons["camera"] = move
+            cons["camera_speed"] = str(s.get("speed") or camera.DEFAULT_SPEED)
+            cons["camera_amount"] = camera.clamp_amount(s.get("camera_amount"))
+        keys.append(f"shot#{i}")
+        scene_per_shot.append(scene_key)
+        tasks.append(Task(ACTION_GENERATE_SHOT,
+                          input={"prompt": s["prompt"], "duration": s.get("duration", 5.0)},
+                          constraints=cons, quality={"min_score": 0.80}))
+    tasks.append(Task(ACTION_COMPOSE,
+                      input={"shots": keys, "output": "final.mp4",
+                             "narration": plan.get("narration") or "",
+                             "sfx": plan.get("sfx") or "",
+                             # 接缝判据要知道"这两镜是不是同一场戏"（同场戏跳变才算违和）
+                             "scenes": scene_per_shot}))
+    moves = "、".join(f"{s.get('camera')}" for s in shots if s.get("camera"))
+    state.log(f"🎬 {source}：{len(shots)} 个镜头（总时长 {plan.get('total_duration')}s）"
+              + (f"，运镜 {moves}" if moves else "")
+              + ("，含旁白" if plan.get("narration") else "")
+              + ("，含音效" if plan.get("sfx") else ""))
+    return tasks
+
+
 class ScriptPlanner(Planner):
     """照剧本拆镜头：用户给了分镜剧本就**按剧本做**，不重新编排。
 
@@ -110,36 +196,52 @@ class ScriptPlanner(Planner):
         return self._queue.pop(0) if self._queue else None
 
     def _build(self, state: ExecutionState) -> None:
-        p = self._plan
-        char_key = next(iter(self.project.characters), "主角") if self.project else "主角"
-        scene_key = next(iter(self.project.scenes), "场景") if self.project else "场景"
-        style = self.project.style if self.project else "cinematic"
-        shots = list(p.get("shots") or [])
-        tasks = [Task(ACTION_STORYBOARD, input={"goal": state.goal}, quality={"min_score": 0.80}),
-                 # 角色/场景资产：档案里已有用户给的参考图时会直接复用（provider 侧保证不覆盖）
-                 Task(ACTION_GENERATE_CHARACTER,
-                      input={"prompt": p.get("title") or state.goal},
-                      constraints={"style": style, "asset_key": char_key}),
-                 Task(ACTION_GENERATE_SCENE,
-                      input={"prompt": p.get("title") or state.goal},
-                      constraints={"style": style, "scene_key": scene_key})]
-        keys: list[str] = []
-        for i, s in enumerate(shots, 1):
-            cons = {"character": char_key, "scene": scene_key, "style": style, "continuity": True}
-            if not s.get("cast"):
-                cons["cast"] = "none"          # 空镜：判据不查角色（否则必然判"角色不符"）
-            keys.append(f"shot#{i}")
-            tasks.append(Task(ACTION_GENERATE_SHOT,
-                              input={"prompt": s["prompt"], "duration": s.get("duration", 5.0)},
-                              constraints=cons, quality={"min_score": 0.80}))
-        tasks.append(Task(ACTION_COMPOSE,
-                          input={"shots": keys, "output": "final.mp4",
-                                 "narration": p.get("narration") or "",
-                                 "sfx": p.get("sfx") or ""}))
-        self._queue = tasks
-        state.log(f"📜 照剧本执行：{len(shots)} 个镜头（剧本总时长 {p.get('total_duration')}s）"
-                  + ("，含旁白" if p.get("narration") else "")
-                  + ("，含音效" if p.get("sfx") else ""))
+        plan = dict(self._plan)
+        plan["written_by"] = "user"        # 用户给的剧本：分镜任务直接用这份，不调模型
+        self._queue = tasks_from_plan(plan, state, self.project, source="照剧本执行")
+
+
+class StoryPlanner(Planner):
+    """HxMV **自己写剧情**：先出分镜（真 LLM 编剧），再照分镜派镜头。
+
+    两相执行（与既有的"懒分发"一致）：
+      第一相：发一个 STORYBOARD 任务（执行器里真调编剧）→ 产出结构化分镜；
+      第二相：分镜成了 → 代码把它翻成资产/镜头/成片任务（`tasks_from_plan`）。
+    编剧失败（模型挂了/JSON 不合法）→ 交回 `fallback` 规划器（LLM 自由规划或 Mock 模板），
+    **绝不让"编剧"这一步把整次生产卡死**——可跑性是底线。
+    """
+
+    def __init__(self, goal: str, brain=None, project=None, fallback=None):
+        self._goal = goal
+        self._brain = brain
+        self.project = project
+        self._fallback = fallback
+        self._story: Task | None = None
+        self._queue: list[Task] = []
+        self._finished = False
+        self._handed_over = False
+
+    def next_task(self, state: ExecutionState) -> Task | None:
+        if self._queue:
+            return self._queue.pop(0)
+        if self._story is None:
+            self._story = Task(ACTION_STORYBOARD, input={"goal": self._goal},
+                               quality={"min_score": 0.0})
+            return self._story
+        if self._finished:
+            return None
+        self._finished = True
+        plan = (self._story.result or {}).get("storyboard") if self._story else None
+        if self._story.status == TaskStatus.PASS and isinstance(plan, dict) and plan.get("shots"):
+            state.log(f"🎬 HxMV 自己写的分镜（{plan.get('written_by', 'llm')}）"
+                      f"：《{plan.get('title', '')}》{plan.get('logline') or ''}".rstrip())
+            self._queue = tasks_from_plan(plan, state, self.project, source="按自己写的分镜执行",
+                                          include_storyboard=False)
+            return self._queue.pop(0)
+        # 编剧没产出可用分镜 → 交回兜底规划（并如实说明，不假装有分镜）
+        state.log("⚠ 编剧未产出可用分镜 → 改走兜底规划")
+        self._handed_over = True
+        return self._fallback.next_task(state) if self._fallback else None
 
 
 class MockPlanner(Planner):
@@ -195,6 +297,15 @@ class MockPlanner(Planner):
             cons1, cons2 = dict(shot_constraints), dict(shot_constraints)
             cons1.update(seeded_cons)          # 学到手的动作幅度等约束也要起手就带上
             cons2.update(seeded_cons)
+            # 运镜规格（v0.9）：目标里写了运镜就照它（"缓慢推近"这类），没写给一个确定性默认——
+            # 基准集锁 mock 规划器时也必须每次一样，否则分数不可比。
+            cam = camera.parse(state.goal) or {}
+            cons1.update({"camera": cam.get("move") or camera.MOVE_PUSH_IN,
+                          "camera_speed": cam.get("speed") or "slow",
+                          "camera_amount": camera.DEFAULT_AMOUNT})
+            cons2.update({"camera": camera.MOVE_STATIC,
+                          "camera_speed": camera.DEFAULT_SPEED,
+                          "camera_amount": camera.DEFAULT_AMOUNT})
             # 项目档案（具体）优先于大脑泛化经验：这一集这个镜头做过 → 沿用上次那版参数，
             # 指纹随即命中 → 直接复用旧画面，一张都不重画。
             hits = [h for h in (self._apply_archive(shot1, cons1),
@@ -203,8 +314,8 @@ class MockPlanner(Planner):
                 state.log(f"♻ 项目档案命中：{'、'.join(hits)}（本集镜头做过 → 沿用旧参数，不重新生成画面）")
             self._queue = [
                 Task(ACTION_STORYBOARD,
-                     input={"goal": state.goal},
-                     quality={"min_score": 0.80}),
+                     input={"goal": state.goal, "offline": True},   # mock/基准集：确定性兜底分镜
+                     quality={"min_score": 0.0}),
                 Task(ACTION_GENERATE_CHARACTER,
                      input={"prompt": f"主角：（{base} 的主角）"},
                      constraints={"style": style, "asset_key": char_key}),
@@ -218,7 +329,8 @@ class MockPlanner(Planner):
                      input=shot2,
                      constraints=cons2),
                 Task(ACTION_COMPOSE,
-                     input={"shots": ["shot#1", "shot#2"], "output": "final.mp4"},
+                     input={"shots": ["shot#1", "shot#2"], "output": "final.mp4",
+                            "scenes": [scene_key, scene_key]},
                      quality={"min_score": 0.85}),
             ]
             self._built = True
@@ -382,11 +494,17 @@ def make_planner(state: ExecutionState, brain=None, project=None) -> Planner:
 
     HXMV_PLANNER=mock|llm 可强制指定（跑基准集必须能锁死规划器，
     否则同一目标每次规划都不一样，分数没有可比性）。
+
+    三条路，优先级从高到低（v0.9 起）：
+      ① 用户贴了分镜剧本 → 照剧本执行（LLM 会重排，实测镜数/内容都对不上）；
+      ② HxMV **自己写剧情**（StoryPlanner：先出分镜再派镜头）——没有剧本时的默认路；
+      ③ 都不可用 → MockPlanner（模板）。
+    编剧失败时 StoryPlanner 会把活交回 LLMPlanner（自由规划）——它再失败才由工厂降级。
     """
     forced = os.environ.get("HXMV_PLANNER", "").strip().lower()
     if forced == "mock":
         return MockPlanner(brain, project)
-    # 剧本优先：用户贴了分镜剧本 → 照剧本拆镜头（LLM 会重排，实测镜数/内容都对不上）
+    # ① 剧本优先：用户贴了分镜剧本 → 照剧本拆镜头
     if not forced:
         plan = script.parse(state.goal)
         if plan and len(plan.get("shots") or []) >= 2:
@@ -396,13 +514,15 @@ def make_planner(state: ExecutionState, brain=None, project=None) -> Planner:
             state.log(f"📜 检测到分镜剧本：{len(plan['shots'])} 个镜头 → 照剧本执行")
             return ScriptPlanner(state.goal, plan, brain, project)
     if forced in ("llm", "auto") or not forced:
-        pass
+        if llm.llm_available():
+            # ② 编剧优先：真 LLM 自己写分镜。兜底规划器**用一次性 state 试跑**，
+            #    避免把它的计划写进真 state.tasks（旧写法会污染任务清单）。
+            fallback = LLMPlanner(brain, project)
+            probe_state = ExecutionState(goal=state.goal)
+            if fallback.next_task(probe_state) is not None:
+                state.log("🎬 没有剧本 → HxMV 自己写剧情（先出分镜，再按分镜拍）")
+                return StoryPlanner(state.goal, brain, project, fallback=fallback)
+            state.log("⚠ LLM 规划失败，降级 MockPlanner")
     else:
         state.log(f"⚠ 未知 HXMV_PLANNER={forced}，按 auto 处理")
-    if llm.llm_available():
-        p = LLMPlanner(brain, project)
-        probe = p.next_task(state)
-        if probe is not None:
-            return p
-        state.log("⚠ LLM 规划失败，降级 MockPlanner")
     return MockPlanner(brain, project)

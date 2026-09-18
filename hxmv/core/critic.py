@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..media import probe
 from ..quality import QualityReport
+from . import camera
 from .state import (
     ACTION_COMPOSE, ACTION_GENERATE_CHARACTER, ACTION_GENERATE_SCENE,
     ACTION_GENERATE_SHOT, Task,
@@ -54,6 +55,10 @@ DEFECT_FIXES = {
     "blurry":       ("rewrite_prompt_sharp", "画面糊：提示词锁清晰度（锐利对焦/细节清晰）"),
     "multi_shot":   ("rewrite_prompt_single_shot", "模型自己剪了镜头：提示词锁「一个连续镜头、无剪辑」"),
     "silent_audio": ("enable_audio", "有音轨但几乎全程静音：让生成模型真的出声"),
+    # v0.9 运镜与接缝：两条都是"看着怪不怪"的直接判据，修正方向也是真改东西
+    # （提示词写死方向 / 加大运镜幅度 / 同场戏接缝加淡入淡出），不是只记一笔账。
+    "camera_mismatch": ("rewrite_prompt_camera", "运镜与规格不符：提示词按规格写死方向与幅度"),
+    "seam_jump":       ("smooth_transition", "同场戏接缝跳变：剪辑点加淡入淡出（转场）"),
 }
 
 # 每层扣分权重（物理最致命——黑帧直接废片）
@@ -135,12 +140,37 @@ class L1PhysicsCritic(Critic):
         # 默认无声：只有这条任务明确要音频（with_audio）时，缺音轨/音量低才算缺陷。
         # 同理"一个连续镜头"只对单镜头任务成立——成片本来就该由多个镜头拼成，
         # 拿 multi_shot 判成片等于把每一部成片都判死（且修无可修）。
+        camera_move, enforced = None, True
+        if task.action == ACTION_GENERATE_SHOT:
+            camera_move = camera.normalize_move(task.constraints.get("camera")
+                                                or task.input.get("camera"))
+            # **只在有硬落点时判运镜**：模型/档位只能靠提示词时（realization="prompt"），
+            # 运镜本来就不由我们决定，判它只会让免费档白烧重试、把能出片的片子判死。
+            # 这时如实降级成"遥测"，并在 detail 里写明白。
+            realization = str((result.get("params") or {}).get("camera_realization") or "")
+            enforced = realization in ("render", "render_approx", "first_last", "native")
+        seam_files, seam_scenes, seam_transition = None, None, None
+        if task.action == ACTION_COMPOSE:
+            files = [str(p) for p in (result.get("files") or []) if probe.is_media_file(p)]
+            seam_files = files or None
+            seam_scenes = task.input.get("scenes")
+            seam_transition = task.input.get("transition")
         metrics = probe.inspect(target, expect_duration=expect,
                                 expect_audio=bool(task.input.get("with_audio")),
-                                expect_single_shot=(task.action == ACTION_GENERATE_SHOT))
+                                expect_single_shot=(task.action == ACTION_GENERATE_SHOT),
+                                expect_camera=(camera_move if (camera_move and enforced) else None),
+                                seam_film=target, seam_files=seam_files,
+                                seam_scenes=seam_scenes, seam_transition=seam_transition)
         if metrics is not None:
             result["metrics"] = metrics                    # 量出来的原始指标，随事件流给面板/审计
-            return self._report(metrics["defects"], detail=probe.describe(metrics))
+            defects = list(metrics["defects"])
+            detail = probe.describe(metrics)
+            if camera_move and not enforced:
+                defects = [d for d in defects if d != "camera_mismatch"]
+                detail += f" · 运镜 {camera_move} 只能靠提示词控制（只作遥测，不判定）"
+            elif camera_move:
+                detail += f" · 运镜规格 {camera_move}（方向/幅度已实测判定）"
+            return self._report(defects, detail=detail)
 
         physics = [d for d in result.get("defects", []) if d in self._INJECTED]
         return self._report(physics)

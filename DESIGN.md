@@ -320,3 +320,78 @@ mock 世界的缺陷是 executor 按概率"贴标签"的，Critic 读标签—�
 - Planner **只提方案不执行**——执行是 Executor/Controller 的事
 - Controller **只判断不动参数**——参数调整是 Refiner 的事
 - 一切以 `state` 为准：闭环的每次推进都改变 state，state 可审计、可续跑、可回放
+
+## 编剧与运镜（v0.9）：把「会拍」拆成规格 / 落点 / 判据
+
+老大 2026-09 的原话：「相当于 hxmv 会自己写剧情和视频画面的流畅度和场景适配度，不要出来怪怪的」。
+拆成三件可验证的事，缺一件都不是"会"。
+
+### 一、编剧（`core/story.py` + `StoryPlanner`）
+
+- 现状缺口（改前）：`STORYBOARD` 是**空壳**（executor 直接返回「镜头 1: 目标前 12 字…」），
+  HxMV 只会两种活——用户贴剧本（`script.parse` 照做）或 LLM 一次性给几句镜头 prompt。
+  **没有故事、没有场次、镜头之间没有叙事关系**。
+- 现在：`story.write(goal, project, brain)` 让 LLM 产出**结构化分镜**
+  （title/logline/scenes[]/shots[{prompt,camera,speed,duration,cast,scene}]/narration/sfx），
+  `story.normalize()` 逐项校验（镜数、场次键、运镜白名单、cast 落回档案键、时长钳制），
+  认不出的一律落回确定值；没有 Key 或模型不听话 → `story.fallback()` 确定性兜底并标 `written_by=fallback`。
+- **两条来源共用一条生产路**：`planner.tasks_from_plan(plan, ...)` 同时服务"用户剧本"和"自己写的分镜"，
+  避免"只有某条路才有的 bug"（历史教训：剧本路径空的镜头、LLM 路径漏 constraints.character）。
+- 两相执行（`StoryPlanner`）：第一相发 STORYBOARD 任务（执行器真调编剧）→ 第二相按分镜派资产/镜头/成片。
+  编剧失败 → 交回 `LLMPlanner`/Mock 兜底（**绝不让编剧把整次生产卡死**）。
+  坑：`tasks_from_plan(include_storyboard=False)` —— 不然一次 run 会出现两个 STORYBOARD，白花一次模型调用。
+
+### 二、运镜：规格在内核、落点在 provider、判据与模型无关
+
+- 规格 `core/camera.py`：14 种规范名 + 中英认词（长词优先；**方向不明不猜**——只写"摇"没写左右时返回 None）
+  + `strip()` 把运镜词从画面描述里剥掉（认出过才剥，否则会误删正文的"镜头"）。
+- 落点声明：`VideoProvider.camera_support`；`camera.pick_strategy()` 按 native > render > first_last > prompt 挑。
+  **换更强的模型 = 加一个适配器 + 一行能力声明**，规划/判据/指纹/闭环一个字不改。
+- 硬落点两条：① `derive_last_frame()` 用 FFmpeg 从首帧派生尾帧（推/拉/摇/俯仰），
+  以 `image_url=[首帧, 尾帧]` 提交给 CogVideoX-3 —— 模型必须从 A 走到 B；② 本地渲染按规格真画轨迹。
+- **指纹**：`camera / camera_speed / camera_amount / _guard_camera` 已进 `_FP_KEYS`，
+  provider 侧还把**实际落点**（`camera_realization`）算进指纹——换落点画面不同，不进指纹就会复用旧片。
+
+### 三、判据：抽帧测运镜 + 剪辑点测接缝（都零新依赖）
+
+- `probe.measure_camera()`：抽 10%/90% 两帧转 64×36 灰度，在候选 (缩放, 位移) 里找最能解释"从 A 到 B"
+  的那组（**双线性**重采样 + 平均绝对差）。踩过的三个坑写在这里：
+  1. 最近邻采样让静止镜头的缩放估计在 0.94~1.04 之间抖（比门限还大）→ 换双线性，噪声降到 ±0.01；
+  2. 候选尺度必须覆盖真实幅度（推镜一整段能到 1.25）：只在 1.0 附近搜会把好镜头判成 `camera_mismatch`；
+  3. `_match` 的 scale 是"取景窗口"大小，与"放大倍数"**互为倒数** —— 对外统一成 zoom>1=推近，
+     免得写反了还看不出来（第一版就写反了，实测 push_in 量出 0.785）。
+- `probe.camera_defects()`：方向必须一致、幅度必须够；static 与无规格不判。
+- `probe.seam_defects(film, files, scenes, transition)`：**量成片本身**在剪辑点前后各 0.08s 的帧相似度，
+  **只判同一场戏**的相邻镜头（换场硬切是正常手法）。为什么必须量成片：如果量两个原始镜头文件，
+  "加淡入淡出"这条修正不会改变实测值 → 被收手守卫当"修正没落地"（"报了缺陷但修不动"的坑）。
+  标定：同场戏正常接缝 0.891 / 坏接缝 0.772 / 坏接缝加淡入淡出 **0.905** → 门限 0.84。
+- **只在有硬落点时判运镜**：provider 只能靠提示词（`realization="prompt"`）时如实降级成遥测并写明，
+  不拿它把免费档能出片的镜头判死。
+- **已知未修（写在这里免得下次重新发现）**：Controller 的收手守卫读的是 `result["measured"]`，
+  而实测值其实在 `result["metrics"]` 里 → 「同样失败 + 同样的实测值」这条判断现在实际等价于
+  「同样失败 + 同样的修正集合就收手」。现有缺陷的修正多为非物理类（提示词/参考强度），
+  守卫对这些本来就不生效，所以危害有限；要它真按实测值判断，得把取值改成 `result["metrics"]`
+  （会让重试判定更准，也可能让 mock 基准集的通过率略变——改的时候要重跑跑分）。
+
+### 四、本地渲染的真轨迹（`local_render._render_shot`）
+
+三条不变量（破坏任何一条，既有标定全部作废）：
+1. **中点（50%）几何 = 居中裁切 + 该镜头自己的中点缩放** —— 推/拉的中点固定 1.15（线性/smoothstep 都过 0.5 时等于它），
+   平移类用 1.35 换位移余量；`_baseline_frame(zoom=...)` 按同一个值做基线，L2 在 50% 采样才对齐（否则一致度假跌）；
+2. **平移/俯仰走线性单向**（不是正弦来回）——判据要方向，来回摆的符号会自相矛盾；
+3. `motion_scale≈0` 或 `camera=static` → 真静止。
+
+实测踩过的两个 zoompan 坑：
+- **`z<1` 会被钳住**（画面反而真的静止）：固定机位的"呼吸式锁机"必须写成 `z_mid ± 0.015`，不能从 1.0 往下摆；
+- **慢到一定程度 freezedetect 会（正确地）判静止**：线性推镜每帧只变 0.2% → 走 **smoothstep**
+  （中点斜率 1.5×、中段每帧 0.6%），中点仍是 1.15，两头平缓不突兀。
+
+### 五、验证（改这一域要重跑的）
+
+```bash
+python3 -m unittest discover -s tests          # 63 例
+python3 tools/calib_camera.py <outdir>          # 8 种运镜真渲染 → 实测缩放/位移/一致度（对照 README 的标定表）
+python3 tools/calib_seam.py <outdir>            # 好接缝/坏接缝/淡入淡出 三组对照
+```
+端到端：`HXMV_PROVIDER=local ... python3 -m hxmv --project X "目标"` 看三行——
+编剧产出（《片名》几镜/运镜）、镜头实测的「运镜缩放…」、成片的「接缝1相似度…」。

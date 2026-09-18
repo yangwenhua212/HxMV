@@ -41,7 +41,10 @@ _FP_KEYS = ("prompt", "duration", "resolution", "fps", "seed", "reference_streng
             # 语义守卫：改的是发给模型的提示词 → 必须进指纹，否则命中缓存、修了等于没修
             "_guard_closer", "_guard_action", "_guard_emotion", "_guard_continuity",
             # v0.8 新增两条守卫（清晰度 / 单镜头）：同样改的是发给模型的提示词
-            "_guard_sharp", "_guard_single_shot")
+            "_guard_sharp", "_guard_single_shot",
+            # v0.9 运镜规格：换运镜（推↔拉↔固定）出来的画面完全不同，不进指纹就会
+            # 命中缓存复用旧片 → "改了运镜却没变"（与 _guard_* 同因，实测踩过三次）
+            "camera", "camera_speed", "camera_amount", "_guard_camera")
 
 
 def fp_params(task, project=None, provider: str | None = None,

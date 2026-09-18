@@ -18,6 +18,7 @@ import random
 from dataclasses import replace
 
 from ..providers.base import ProviderError
+from . import story
 from .state import (
     ACTION_COMPOSE, ACTION_GENERATE_CHARACTER, ACTION_GENERATE_SCENE,
     ACTION_GENERATE_SHOT, ACTION_STORYBOARD, Task,
@@ -128,8 +129,9 @@ class MockVideoExecutor(Executor):
         cost = COST_PER_ACTION.get(task.action, 1.0)
 
         if task.action == ACTION_STORYBOARD:
-            return {"storyboard": [f"镜头 {i}: {task.input.get('goal', '')[:12]}…" for i in (1, 2)],
-                    "cost_units": cost}
+            # 真编剧（v0.9）：mock 世界里也产出**结构化分镜**（不带 offline 时会真调 LLM）。
+            # 旧的假分镜（"镜头 1: <前12字>…"）已经删掉——它让面板上的 STORYBOARD 形同虚设。
+            return {"storyboard": story.from_task(task, self.project), "cost_units": cost}
         if task.action in (ACTION_GENERATE_CHARACTER, ACTION_GENERATE_SCENE):
             return {"asset": task.constraints.get("asset_key") or task.constraints.get("scene_key"),
                     "cost_units": cost}
@@ -198,6 +200,11 @@ class ProviderExecutor(Executor):
                 if self.parallel_safe else None)
 
     def execute(self, task: Task) -> dict:
+        if task.action == ACTION_STORYBOARD:
+            # 分镜是**编剧**的活，不是生成服务的活：不发给 provider（省一次 API 往返，
+            # 也不该让 provider 假装会写剧本）。用户剧本 / 离线兜底 / 真 LLM 三路见 story.from_task。
+            return {"storyboard": story.from_task(task, getattr(self.provider, "project", None)),
+                    "cost_units": 0.0}
         api_task = replace(task)
         api_task.input = dict(task.input)          # 浅拷贝，不污染原 Task（审计干净）
         api_task.constraints = dict(task.constraints)

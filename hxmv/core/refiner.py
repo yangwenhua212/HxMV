@@ -31,6 +31,11 @@ _ADJUST = {
     # （分辨率与帧率已经分别由 low_clarity / fps_too_low 负责，别混）
     "rewrite_prompt_sharp":        ("input", "_guard_sharp", None, True),
     "rewrite_prompt_single_shot":  ("input", "_guard_single_shot", None, True),
+    # v0.9 运镜：提示词里写死方向（真改提示词）+ 加大运镜幅度（本地渲染真变大）
+    "rewrite_prompt_camera":       ("input", "_guard_camera", None, True),
+    "boost_camera_amount":         ("constraints", "camera_amount", 0.2, 1.0),
+    # v0.9 接缝：同场戏剪辑点跳变 → 成片加淡入淡出（本地拼接层真做转场）
+    "smooth_transition":           ("input", "transition", None, "fade"),
 }
 
 _HUMAN_HINT = {
@@ -50,6 +55,9 @@ _HUMAN_HINT = {
     "rewrite_prompt_continuity": "与前后镜不连续 → 提示词补衔接约束",
     "rewrite_prompt_sharp": "画面模糊 → 提示词锁清晰度（锐利对焦/细节清晰）",
     "rewrite_prompt_single_shot": "模型自己剪了镜头 → 提示词锁「一个连续镜头、无剪辑」",
+    "rewrite_prompt_camera": "运镜与规格不符 → 提示词按规格写死方向与节奏",
+    "boost_camera_amount": "运镜幅度太小 → 加大运镜幅度",
+    "smooth_transition": "同场戏接缝跳变 → 剪辑点加淡入淡出",
 }
 
 # 哪些修正的效果**会**出现在实测值里（ffprobe/blackdetect/freezedetect/音量）。
@@ -65,6 +73,10 @@ MEASURABLE_FIXES = {
     "extend_duration": "duration",
     "trim_duration": "duration",
     "increase_motion_scale": "freeze_seconds",
+    # 运镜幅度是真的改渲染（实测值会变）→ 允许用"实测值没变"推断修正没落地；
+    # 提示词类（rewrite_prompt_camera）**不能**进这张表，否则会误杀重试。
+    "boost_camera_amount": "camera",
+    "smooth_transition": "seams",
 }
 
 # 一次最多应用几条修正。所有现有旋钮彼此正交（分辨率/帧率/音量/黑场/参考强度/运动/时长），
@@ -82,6 +94,8 @@ _FIX_PRIORITY = {
     "emotion_wrong": 2,
     "plot_break": 2,
     "multi_shot": 2,      # 模型自己剪了片 = 内容不符，跟"动作/情绪不对"同档，优先于物理项
+    "camera_mismatch": 2,  # 镜头语言不符（该推却在摇）= 内容不符，同档
+    "seam_jump": 3,       # 成片层：同场戏接缝跳变（拼接问题，先于物理微调修）
     "semantic_mismatch": 3,
     "low_clarity": 4,
     "blurry": 4,          # 与清晰度不足同档（都是"画面不够精致"）

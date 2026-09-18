@@ -29,6 +29,12 @@ class VideoProvider(abc.ABC):
     action_map: dict = {}            # 本 provider 支持的 Task.action → API 动作
     max_duration: float | None = None  # 单镜头时长上限（秒）：模型做不到的别要，见 execute() 的钳制
 
+    # 运镜落点声明（`core/camera.py` 的 CAPABILITIES 子集）：
+    #   native / first_last / prompt / render —— 从硬到软。没声明的一律按最弱的 prompt 处理
+    #   （**不许吹能力**：声明了闭环就会按它挑落点，声明错了等于骗自己）。
+    # 换更强的模型时，这里加一行就是"运镜跟着升级"的全部改动，规划/判据/指纹/闭环都不用动。
+    camera_support: set = set()
+
     @abc.abstractmethod
     def generate(self, task) -> dict:
         """执行一个 Task，返回 result dict（与 Mock 同构：media/defects/元数据/cost_units）。

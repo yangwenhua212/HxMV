@@ -55,12 +55,24 @@ THRESHOLDS = {
     "silence_db": -50.0,         # silencedetect 的静音门限
     "silence_min_seconds": 0.5,  # 短于此时长的静音不算一段
     "silence_ratio": 0.90,       # 静音累计占比超过此 → silent_audio（有音轨但等于没有）
+    # ---------- 运镜（v0.9）：抽帧估全局位移/缩放，判「是不是真按规格动了」 ----------
+    # 门限按 local 真渲染标定（见 measure_camera 的注释）：方向必须对，幅度必须够。
+    "camera_min_zoom_delta": 0.015,   # |缩放比 - 1| 小于此 = 没推拉
+    "camera_min_pan_ratio": 0.010,    # 位移占画面宽/高的比例，小于此 = 没平移
+    # ---------- 接缝（同场戏两镜之间的跳变）----------
+    # 标定（local 真渲染，两镜 4s，16×16 像素相似度，接缝前后各取 0.08s）：
+    #   同场戏正常接缝 0.891 / 色调大幅漂移的坏接缝 0.772 / 坏接缝**加淡入淡出后 0.905**。
+    # 门限取 0.84 = 正常接缝放行、明显跳变抓得住，且"加转场"这条修正真的能把它拉回阈值以上。
+    # 接真实 AI 视频后应重新标定（AI 镜头之间的自然差异比本地渲染大）。
+    "min_seam_similarity": 0.84,
+    "seam_sample_seconds": 0.08,      # 接缝前后各取多少秒的帧来比（要落在转场混合窗口内）
 }
 
 # 缺陷键必须与 core/critic.py 的 DEFECT_FIXES 对齐（那里定义修正方向）
 DEFECT_KEYS = ("black_frame", "low_clarity", "fps_too_low", "low_volume", "no_audio",
                "frozen_frame", "too_short", "too_long",
-               "blurry", "multi_shot", "silent_audio")
+               "blurry", "multi_shot", "silent_audio",
+               "camera_mismatch", "seam_jump")
 
 _FFMPEG = None
 
@@ -466,11 +478,224 @@ def cleanup_frames(tmp: str) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------- 运镜测量：抽帧 → 估计全局位移/缩放（纯 stdlib，零依赖） ----------
+
+def _gray_frame(path: str, at: float, w: int = 64, h: int = 36) -> bytes | None:
+    """取某时刻的一帧 → w×h 灰度原始字节（不做彩色转换，测量只要亮度结构）。"""
+    if not has_ffmpeg() or not is_media_file(path):
+        return None
+    p = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(0.0, at):.3f}", "-i", path,
+                        "-frames:v", "1", "-vf", f"scale={w}:{h}", "-f", "rawvideo",
+                        "-pix_fmt", "gray", "-"], capture_output=True)
+    data = p.stdout or b""
+    return data if len(data) == w * h else None
+
+
+def _view(img: bytes, w: int, h: int, scale: float, dx: float, dy: float) -> list[int]:
+    """把 A 帧按「相机参数」取一个视野：以中心偏移 (dx,dy)、缩放 scale 裁窗后重采样到 w×h。
+
+    scale>1 = 视野更小（画面被放大）；dx>0 = 视野向右偏（= 镜头右移）；dy>0 = 视野向下偏。
+
+    **双线性**采样（不是最近邻）：最近邻会让同一个静态画面在候选尺度之间跳来跳去，
+    实测静止镜头的缩放估计能在 0.94~1.04 之间抖——那比判据门限还大，等于判不了。
+    """
+    full_w, full_h = w * scale, h * scale
+    left, top = (w - full_w) / 2 + dx, (h - full_h) / 2 + dy
+    out = bytearray(w * h)
+    for j in range(h):
+        fy = top + full_h * (j + 0.5) / h - 0.5
+        y0 = int(fy // 1)
+        ty = fy - y0
+        y1 = min(h - 1, y0 + 1)
+        y0 = 0 if y0 < 0 else (h - 1 if y0 >= h else y0)
+        for i in range(w):
+            fx = left + full_w * (i + 0.5) / w - 0.5
+            x0 = int(fx // 1)
+            tx = fx - x0
+            x1 = min(w - 1, x0 + 1)
+            x0 = 0 if x0 < 0 else (w - 1 if x0 >= w else x0)
+            v = (img[y0 * w + x0] * (1 - tx) * (1 - ty) + img[y0 * w + x1] * tx * (1 - ty)
+                 + img[y1 * w + x0] * (1 - tx) * ty + img[y1 * w + x1] * tx * ty)
+            out[j * w + i] = int(v + 0.5)
+    return out
+
+
+def _halve(img: bytes, w: int, h: int) -> tuple[bytes, int, int]:
+    """2×2 盒式降采样（粗匹配用；纯 Python，一帧也就几百次加法）。"""
+    hw, hh = w // 2, h // 2
+    out = bytearray(hw * hh)
+    for j in range(hh):
+        row = (2 * j) * w
+        for i in range(hw):
+            o = row + 2 * i
+            out[j * hw + i] = (img[o] + img[o + 1] + img[o + w] + img[o + w + 1]) // 4
+    return bytes(out), hw, hh
+
+
+def _cost(a: bytes, b: bytes, w: int, h: int, scale: float, dx: float, dy: float) -> float:
+    return sum(abs(x - y) for x, y in zip(_view(a, w, h, scale, dx, dy), b)) / len(b)
+
+
+def _match(a: bytes, b: bytes, w: int, h: int, span: int = 8) -> tuple[float, float, float]:
+    """找最能解释「A → B」的相机动作：返回 (scale, dx, dy)，最小化平均绝对差。
+
+    两级搜索（**逐帧测量要快**：这个函数每个镜头都要跑，粗搜 729 个候选在纯 Python 里要 1~2 秒）：
+      粗搜：半分辨率（2×2 盒式）+ 步长 2（半分辨率像素 = 2 个原像素）→ 只有 1/8 的候选量；
+      精修：回到原分辨率，在粗解附近 ±2px / ±0.02 缩放。
+
+    候选尺度要**覆盖真实运镜幅度**（推镜一整段能到 1.25+）：只在 1.0 附近搜会量出"没推"，
+    于是好镜头被判 camera_mismatch（踩过）。
+    """
+    hw, hh = w // 2, h // 2
+    ha, hb = _halve(a, w, h), _halve(b, w, h)
+    best, best_cost = (1.0, 0.0, 0.0), None
+    for scale in (0.80, 0.92, 1.0, 1.10, 1.25, 1.40):
+        for dx in range(-span // 2, span // 2 + 1, 2):
+            for dy in range(-span // 2, span // 2 + 1, 2):
+                cost = _cost(ha[0], hb[0], hw, hh, scale, dx, dy)
+                if best_cost is None or cost < best_cost:
+                    best_cost, best = cost, (scale, float(dx) * 2, float(dy) * 2)
+    scale, dx, dy = best
+    for s2 in (scale - 0.03, scale - 0.015, scale, scale + 0.015, scale + 0.03):
+        for x2 in (dx - 2, dx - 1, dx, dx + 1, dx + 2):
+            for y2 in (dy - 2, dy - 1, dy, dy + 1, dy + 2):
+                if s2 <= 0:
+                    continue
+                cost = _cost(a, b, w, h, s2, x2, y2)
+                if cost < best_cost:
+                    best_cost, best = cost, (s2, x2, y2)
+    return round(best[0], 4), round(best[1], 2), round(best[2], 2)
+
+
+def measure_camera(path: str, w: int = 64, h: int = 36) -> dict | None:
+    """量一个镜头的运镜：`{zoom, pan, tilt, pan_ratio, tilt_ratio, move}`。
+
+    做法：抽两帧（10% 与 90%，跨整段），在候选 (缩放, 位移) 里找最能解释"从 A 到 B"的那组 ——
+    最近邻重采样 + 平均绝对差，纯 stdlib（没有 OpenCV/numpy 也能跑）。
+
+    为什么采样 10%/90%：既避开片头黑场，又拿到接近整段的最大位移（10%/50% 只有一半，1px 级别的
+    位移根本量不准）。判据只信**方向 + 幅度够不够**，不做亚像素拟合。
+
+    标定（local 真渲染，5s）：push_in ≈ 1.2~1.3、pan_right ≈ +8~10px(64宽) → 门限取
+    `camera_min_zoom_delta 0.015` / `camera_min_pan_ratio 0.010`，静止镜头 ≈ 1.0 / 0px。
+    """
+    if not has_ffmpeg() or not is_media_file(path):
+        return None
+    duration = (probe_container(path) or {}).get("duration") or 0.0
+    if duration < 0.5:
+        return None
+    a = _gray_frame(path, duration * 0.10, w, h)
+    b = _gray_frame(path, duration * 0.90, w, h)
+    if not a or not b:
+        return None
+    zoom, dx, dy = _match(a, b, w, h)
+    # `_match` 的 scale 是"匹配 B 所需的**取景窗口**大小"：窗口更小（scale<1）= 画面被放大。
+    # 对外统一成放大倍数（zoom>1 = 推近），与 camera 规格、判据、人话都一致。
+    return {"zoom": round(1.0 / zoom, 4) if zoom else None, "pan": dx, "tilt": dy,
+            "pan_ratio": round(dx / w, 4), "tilt_ratio": round(dy / h, 4)}
+
+
+def camera_defects(cam: dict | None, expect_move: str | None, amount=None) -> list[str]:
+    """按**镜头规格**判运镜对不对：方向必须一致、幅度必须够。返回缺陷键列表。
+
+    只在**该镜头有明确运镜规格**时才判（没规格 = 不查，别拿默认值冤枉镜头）；
+    static 不判（静止是合法的艺术选择，多查一层只会带来假阳）。
+    """
+    if not cam or not expect_move:
+        return []
+    from ..core import camera as cam_mod            # 反向导入：本模块只做测量，规格表在 camera
+    move = cam_mod.normalize_move(expect_move)
+    if move in (None, cam_mod.MOVE_STATIC):
+        return []
+    zoom = cam.get("zoom") or 1.0
+    pan_ratio = cam.get("pan_ratio", 0.0) or 0.0
+    tilt_ratio = cam.get("tilt_ratio", 0.0) or 0.0
+    t = THRESHOLDS
+    zoom_d = zoom - 1.0
+    want = cam_mod.DIRECTIONAL.get(move)
+    if want is None:
+        # 环绕/跟拍/手持：只要求"确实在动"（方向由整段轨迹决定，单对帧判不出）
+        moving = (abs(zoom_d) > t["camera_min_zoom_delta"]
+                  or abs(pan_ratio) > t["camera_min_pan_ratio"]
+                  or abs(tilt_ratio) > t["camera_min_pan_ratio"])
+        return [] if moving else ["camera_mismatch"]
+    axis, sign = want
+    got = zoom_d if axis == "zoom" else (pan_ratio if axis == "pan" else tilt_ratio)
+    if axis == "zoom":
+        return [] if got * sign > t["camera_min_zoom_delta"] else ["camera_mismatch"]
+    return [] if got * sign > t["camera_min_pan_ratio"] else ["camera_mismatch"]
+
+
+# ---------- 接缝：同场戏两镜之间的跳变（成片层"看着怪"的主要来源之一） ----------
+
+def seam_similarity(prev: str, nxt: str, n: int = 16) -> float | None:
+    """前一镜**末帧** vs 后一镜**首帧**的外观相似度 ∈ [0,1]（同一套 16×16 像素距离）。
+
+    为什么看这两帧：观众感知到的"跳"就发生在剪辑点上；同场戏（同一个场景、同一个角色）
+    的两镜之间突然变色调/变构图，就是"看着怪"，这和"换个场景硬切"是两回事——所以调用方
+    必须**按场次分流**（不同场次之间硬切是正常的）。
+    """
+    if not (is_media_file(prev) and is_media_file(nxt)):
+        return None
+    d_prev = (probe_container(prev) or {}).get("duration") or 0.0
+    a = _thumbnail_bytes(prev, n=n, at=max(0.0, d_prev - 0.12))
+    b = _thumbnail_bytes(nxt, n=n, at=0.12, yuv_first=True)
+    if not a or len(a) != len(b):
+        return None
+    diff = math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+    return round(1.0 - diff / math.sqrt(len(a) * 255 * 255), 4)
+
+
+def seam_defects(film: str | None, files: list[str], scenes: list[str] | None = None,
+                 transition: str | None = None) -> tuple[list[str], list[dict]]:
+    """成片接缝检查：只对**同一场戏**的相邻镜头判跳变（换场硬切不判）。
+
+    **量的是成片本身**（在剪辑点前后各取一帧），不是两个原始镜头文件——否则
+    "同一场戏接缝跳变 → 加淡入淡出"这条修正根本不会改变实测值（成片变了、镜头文件没变），
+    会被收手守卫当成"修正没落地"（踩过这一类"报了缺陷但修不动"的坑）。
+
+    剪辑点位置由各镜头时长推出来（交叉淡化时淡化的中心就是接缝中心）。
+    返回 `(defects, seams)`；seams 是逐条遥测（进 metrics 给面板/审计看）。
+    """
+    defects: list[str] = []
+    seams: list[dict] = []
+    if not is_media_file(film) or not (files and len(files) > 1):
+        return defects, seams
+    film_duration = float((probe_container(film) or {}).get("duration") or 0.0)
+    durations = [float((probe_container(f) or {}).get("duration") or 0.0) for f in files]
+    if not film_duration or any(d <= 0 for d in durations):
+        return defects, seams
+    fade = 0.4 if str(transition or "") == "fade" else 0.0
+    cum = 0.0
+    for i in range(1, len(files)):
+        cum += durations[i - 1]
+        join = cum - fade * i + fade / 2
+        same_scene = True
+        if scenes and i < len(scenes) and i - 1 < len(scenes):
+            same_scene = str(scenes[i]) == str(scenes[i - 1])
+        if not same_scene:
+            continue                      # 换场硬切是正常剪辑手法，不判
+        before, after = join - THRESHOLDS["seam_sample_seconds"], join + THRESHOLDS["seam_sample_seconds"]
+        if before < 0 or after > film_duration:
+            continue
+        a = _thumbnail_bytes(film, n=16, at=before)
+        b = _thumbnail_bytes(film, n=16, at=after, yuv_first=True)
+        if not a or len(a) != len(b):
+            continue
+        diff = math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+        sim = round(1.0 - diff / math.sqrt(len(a) * 255 * 255), 4)
+        seams.append({"at": i, "similarity": sim, "join": round(join, 2)})
+        if sim < THRESHOLDS["min_seam_similarity"]:
+            defects.append("seam_jump")
+    return defects, seams
+
+
 # ---------- 汇总：一次测量 → 指标 + 缺陷 ----------
 
 def detect_defects(m: dict, expect_duration: float | None = None,
                    expect_audio: bool = False,
-                   expect_single_shot: bool = False) -> list[str]:
+                   expect_single_shot: bool = False,
+                   expect_camera: str | None = None) -> list[str]:
     """从量出来的指标推缺陷（纯判据，可单测）。
 
     expect_audio：**默认无声**——AI 视频本来就不带音轨，用户没要音频时"没音轨"是正常状态，
@@ -532,13 +757,28 @@ def detect_defects(m: dict, expect_duration: float | None = None,
             defects.append("too_short")
         elif ratio > t["duration_ratio_high"]:
             defects.append("too_long")
+    # 运镜：规格要求的方向/幅度对不上 → camera_mismatch（只在有规格时判；static 不判）
+    defects.extend(camera_defects(m.get("camera"), expect_camera))
+    for d in (m.get("seam_defects") or []):
+        if d not in defects:
+            defects.append(d)
     return defects
 
 
 def inspect(path: str | None, expect_duration: float | None = None,
             expect_audio: bool = False,
-            expect_single_shot: bool = False) -> dict | None:
-    """量一个媒体文件：返回指标 + defects；不是真文件/没 ffmpeg → None（调用方回落 mock 标签）。"""
+            expect_single_shot: bool = False,
+            expect_camera: str | None = None,
+            seam_film: str | None = None,
+            seam_files: list[str] | None = None,
+            seam_scenes: list[str] | None = None,
+            seam_transition: str | None = None) -> dict | None:
+    """量一个媒体文件：返回指标 + defects；不是真文件/没 ffmpeg → None（调用方回落 mock 标签）。
+
+    除物理指标外还量两件"看着怪不怪"的事（都不花钱、纯抽帧算）：
+    - **运镜**：全局位移/缩放（`measure_camera`）——进 metrics 做遥测，有规格时进判据；
+    - **接缝**：成片里同场戏相邻镜头的剪辑点跳变（`seam_defects`，只有传 seam_files 时跑）。
+    """
     if not is_media_file(path):
         return None
     container = probe_container(path)
@@ -553,7 +793,13 @@ def inspect(path: str | None, expect_duration: float | None = None,
     m["freeze_seconds"] = freeze
     # 第二趟量扩展判据（模糊/切换/响度/静音占比）——独立一条链，不动上面已标定的那条
     m.update(measure_extended(str(path), container.get("duration")))
-    m["defects"] = detect_defects(m, expect_duration, expect_audio, expect_single_shot)
+    m["camera"] = measure_camera(str(path))
+    if seam_files:
+        seam_d, seams = seam_defects(seam_film or str(path), list(seam_files), seam_scenes,
+                                     seam_transition)
+        m["seams"], m["seam_defects"] = seams, seam_d
+    m["defects"] = detect_defects(m, expect_duration, expect_audio, expect_single_shot,
+                                  expect_camera)
     return m
 
 
@@ -575,4 +821,9 @@ def describe(m: dict) -> str:
         line += f" 切换{m['scene_cuts']}"
     if m.get("lufs") is not None:
         line += f" 响度{m['lufs']:.1f}LUFS"
+    cam = m.get("camera") or {}
+    if cam.get("zoom") is not None:
+        line += f" 运镜缩放{cam['zoom']:.3f}/横移{cam.get('pan', 0):+.1f}px/俯仰{cam.get('tilt', 0):+.1f}px"
+    for s in (m.get("seams") or []):
+        line += f" 接缝{s['at']}相似度{s['similarity']:.2f}"
     return line

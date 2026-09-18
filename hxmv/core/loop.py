@@ -32,7 +32,7 @@ from .controller import Controller
 from .critic import PipelineCritic
 from .executor import make_executor
 from .planner import make_planner
-from .state import ACTION_GENERATE_SHOT, ExecutionState, TaskStatus
+from .state import ACTION_GENERATE_SHOT, ACTION_STORYBOARD, ExecutionState, TaskStatus
 
 
 # 同一个基础设施错误连续放倒几个任务 = 环境问题已坐实，停止本次 run
@@ -118,7 +118,7 @@ def _execute_batch(executor, tasks: list, state, emit, verbose: bool,
 
 def banner(state: ExecutionState) -> None:
     print("\n" + "═" * 52)
-    print(f"  HxMV 自主控制闭环  v0.6 · 真 AI 视频 + 项目档案")
+    print(f"  HxMV 自主控制闭环  v0.9 · 自己写剧情 + 会运镜")
     print(f"  目标：{state.goal}")
     print("═" * 52)
 
@@ -403,6 +403,10 @@ def run(goal: str,
                   "attempts_used": attempts_used,
                   "max_attempts": task.retry_policy.get("max_attempts", 3),
                   "refine_history": list(task.refine_history)}
+            if task.action == ACTION_STORYBOARD:
+                # 分镜要**看得见**（"HxMV 自己写的剧情"长什么样）——事件带上结构化分镜。
+                # 只在分镜任务上带（事件保持精简；其它任务的结果走 files 接口）。
+                ev["storyboard"] = _result_brief(result).get("storyboard")
             if decision == "PASS":
                 ev["fixes_applied"] = [dict(f) for f in task.fixes_applied]
             elif decision == "RETRY":

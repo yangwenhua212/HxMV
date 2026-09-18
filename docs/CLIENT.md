@@ -48,8 +48,8 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 |---|---|---|
 | `run.start` | `goal`, `phase` | 开始，显示目标 |
 | `task.start` | `action`, `task_id`, `kind` | 任务卡片：动作名 + 第几次尝试 |
-| `critic` | `action`, `score`, `failures[]`, `measured.metrics` | **实测指标**（分辨率/帧率/时长/音量/黑帧/一致度）+ 分数 |
-| `decision` | `decision: PASS\|RETRY\|FAIL`, `note` | 通过 / 修正 / 失败 |
+| `critic` | `action`, `score`, `failures[]`, `measured.metrics`（含 `camera`＝实测运镜：`zoom/pan/tilt`、`seams`＝同场戏接缝相似度） | **实测指标**（分辨率/帧率/时长/音量/黑帧/一致度/运镜/接缝）+ 分数 |
+| `decision` | `decision: PASS\|RETRY\|FAIL`, `note`, **`storyboard`（仅 `action=STORYBOARD` 时带：HxMV 自己写的分镜，含 title/logline/scenes/shots[{n,camera,speed,duration,cast,prompt}]/narration/sfx/written_by）** | 通过 / 修正 / 失败；**分镜任务要把剧情渲染出来**（"自己写剧情"要看得见） |
 | `infra.retry` | `error`, `retryable` | "服务端抖动，自动重试"（和服务无关的错误） |
 | `run.done` | `completed`, `attempts`, `cost_units`, **`artifacts[]`（本次全部成品的绝对路径）**, `n_reused` | 收尾 + 产物列表（**含复用自项目档案的旧文件**） |
 | `notify` | `result` | 推送是否成功（客户端可忽略） |
@@ -145,6 +145,18 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
    面板/客户端/分集产物清单都齐
 2. **Cloudflare 403 掉 `Python-urllib` 的默认 UA** → HxMV 所有对外请求统一带 `HxMV/<版本>` UA；
    客户端（OkHttp/浏览器）天然没这个问题，但用 Python 写脚本调试时要注意
+
+## 运镜契约（v0.9，客户端/工具若要自己下任务）
+
+- **内部语义**（Task.constraints）：`camera`（推近/拉远/摇/移/跟/升降/环绕/手持/固定等规范名）、
+  `camera_speed`（slow/normal/fast）、`camera_amount`（0.1~1.0 幅度）。
+- **落点由 provider 声明**（`camera_support`）：`native`（可灵 camera_control 六轴）/ `render`（本地自己画）/
+  `first_last`（智谱 CogVideoX-3：`image_url` 传 `[首帧, 尾帧]`）/ `prompt`（只能写提示词）。
+- **产物回执**：`result.params` 里带 `camera` / `camera_realization`（这次实际用了哪个落点）——
+  客户端可以据此如实显示"运镜靠提示词"还是"原生参数/首尾帧钉死"，**不要替服务端吹能力**。
+- **判据**：`metrics.camera = {zoom, pan, tilt, pan_ratio, tilt_ratio}`（实测），
+  规格方向对不上 → 缺陷 `camera_mismatch`；同场戏接缝跳变 → `seam_jump`（`metrics.seams` 是逐条遥测）。
+  只能靠提示词的档位**不判**（只作遥测），detail 里会写明。
 
 ## 网页版（同一实例，浏览器直接用）
 

@@ -21,13 +21,17 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from hxmv.core import camera as cam
 from hxmv.core import executor as exec_mod
+from hxmv.core import planner as planner_mod
+from hxmv.core import story
 from hxmv.core.brain import Entry, similarity
 from hxmv.core.critic import DEFECT_FIXES
 from hxmv.core.executor import MockVideoExecutor, make_executor
 from hxmv.core.project import _FP_KEYS, fingerprint, fp_params
+from hxmv.core import refiner as refiner_mod
 from hxmv.core.refiner import _ADJUST, _HUMAN_HINT, _apply
-from hxmv.core.state import Task
+from hxmv.core.state import ExecutionState, Task, TaskStatus
 from hxmv.media import probe
 from hxmv.media.probe import THRESHOLDS, detect_defects
 from hxmv.media.sheet import crop_box
@@ -479,3 +483,206 @@ class BatchExecutionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ---------------------------------------------------------------- 运镜（v0.9）
+class CameraSpecTest(unittest.TestCase):
+    """运镜规格：认词、收敛、剥词、投影。这一层错了，后面判据再准也是错的。"""
+
+    def test_chinese_move_words_are_recognized(self):
+        self.assertEqual(cam.normalize_move("镜头缓慢推近"), "push_in")
+        self.assertEqual(cam.normalize_move("向左摇"), "pan_left")
+        self.assertEqual(cam.normalize_move("环绕主角一圈"), "orbit")
+        self.assertEqual(cam.normalize_move("机位固定"), "static")
+        self.assertEqual(cam.normalize_move("dolly out"), "pull_out")
+
+    def test_directionless_move_is_not_guessed(self):
+        # 只写"摇"没写方向 → 不许猜（判据要方向，猜错等于判错）
+        self.assertIsNone(cam.parse("镜头缓慢摇过全场"))
+
+    def test_speed_is_parsed(self):
+        self.assertEqual(cam.parse("镜头缓缓推近")["speed"], "slow")
+        self.assertEqual(cam.parse("镜头快速推近")["speed"], "fast")
+        self.assertEqual(cam.parse("镜头推近")["speed"], "normal")
+
+    def test_strip_only_when_a_move_was_found(self):
+        # 认出过运镜才剥词：不然会误删正文里的"镜头"（"镜头里只有一只鸟"）
+        self.assertNotIn("缓慢", cam.strip("镜头缓慢推近，猴子站在崖顶"))
+        self.assertEqual(cam.strip("镜头里只有一只鸟在飞"), "镜头里只有一只鸟在飞")
+
+    def test_phrase_is_english_camera_language(self):
+        self.assertIn("pushes in", cam.phrase("push_in", "slow"))
+        self.assertIn("pulls back", cam.phrase("pull_out"))
+        self.assertIn("locked off", cam.phrase("static"))
+
+    def test_native_params_map_to_kling_axes(self):
+        cfg = cam.native_params("pan_right", "slow", 1.0)["config"]
+        self.assertGreater(cfg["pan"], 0)          # 右摇 → pan 正
+        self.assertEqual(cfg["zoom"], 0.0)
+        self.assertLess(cam.native_params("pull_out", "normal", 1.0)["config"]["zoom"], 0)
+
+    def test_capability_pick_prefers_hard_levers(self):
+        class P:
+            camera_support = {"prompt", "render"}
+        self.assertEqual(cam.pick_strategy(P()), "render")
+        class Q:
+            camera_support = {"prompt", "first_last"}
+        self.assertEqual(cam.pick_strategy(Q(), prefer_first_last=True), "first_last")
+        # 没声明 = 最弱的 prompt（不许吹能力）
+        self.assertEqual(cam.pick_strategy(object()), "prompt")
+
+
+class CameraCriticTest(unittest.TestCase):
+    """运镜判据：方向要对、幅度要够；没规格/固定机位不查。"""
+
+    def test_expected_direction_is_enforced(self):
+        self.assertEqual(probe.camera_defects({"zoom": 1.2, "pan_ratio": 0.0, "tilt_ratio": 0.0},
+                                              "push_in"), [])
+        self.assertEqual(probe.camera_defects({"zoom": 0.95, "pan_ratio": 0.0, "tilt_ratio": 0.0},
+                                              "push_in"), ["camera_mismatch"])
+        self.assertEqual(probe.camera_defects({"zoom": 1.0, "pan_ratio": 0.12, "tilt_ratio": 0.0},
+                                              "pan_right"), [])
+        self.assertEqual(probe.camera_defects({"zoom": 1.0, "pan_ratio": 0.12, "tilt_ratio": 0.0},
+                                              "pan_left"), ["camera_mismatch"])
+
+    def test_static_and_specless_are_not_judged(self):
+        moved = {"zoom": 1.4, "pan_ratio": 0.3, "tilt_ratio": 0.2}
+        self.assertEqual(probe.camera_defects(moved, "static"), [])
+        self.assertEqual(probe.camera_defects(moved, None), [])
+        self.assertEqual(probe.camera_defects(None, "push_in"), [])
+
+    def test_approximate_moves_only_require_real_motion(self):
+        self.assertEqual(probe.camera_defects({"zoom": 1.0, "pan_ratio": 0.0, "tilt_ratio": 0.0},
+                                              "orbit"), ["camera_mismatch"])
+        self.assertEqual(probe.camera_defects({"zoom": 1.03, "pan_ratio": 0.0, "tilt_ratio": 0.0},
+                                              "orbit"), [])
+
+    def test_new_defect_keys_are_wired_everywhere(self):
+        """新增缺陷键要同时落五处（probe / critic / refiner 两张表 + 人类提示）。
+
+        漏任何一处 = 判得出来却修不动、或者排到最后白等（技能里写过的规矩）。
+        """
+        for key in ("camera_mismatch", "seam_jump"):
+            with self.subTest(key=key):
+                self.assertIn(key, probe.DEFECT_KEYS)
+                self.assertIn(key, DEFECT_FIXES)
+                self.assertIn(DEFECT_FIXES[key][0], _ADJUST)
+                self.assertIn(key, refiner_mod._FIX_PRIORITY)
+
+
+# ---------------------------------------------------------------- 分镜（编剧 / 剧本）
+class StoryboardTest(unittest.TestCase):
+    def test_normalize_keeps_cameras_and_drops_moves_from_prompt(self):
+        plan = story.normalize({"title": "测试", "shots": [
+            {"prompt": "镜头缓慢推近，柯基在雪地奔跑", "camera": "push_in", "duration": 5,
+             "cast": ["柯基"], "scene": "s1"},
+            {"prompt": "全景雪原", "camera": "未知运镜", "duration": 5, "cast": []},
+        ]}, "柯基追蝴蝶")
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["shots"][0]["camera"], "push_in")
+        self.assertNotIn("推近", plan["shots"][0]["prompt"])     # 运镜归 camera，不进画面描述
+        self.assertEqual(plan["shots"][1]["camera"], "static")   # 认不出的运镜落回固定
+        self.assertEqual(plan["shots"][1]["cast"], [])
+
+    def test_too_few_shots_is_rejected(self):
+        self.assertIsNone(story.normalize({"shots": [{"prompt": "一个镜头"}]}, "目标"))
+
+    def test_fallback_is_deterministic_and_labelled(self):
+        a, b = story.fallback("雪地柯基"), story.fallback("雪地柯基")
+        self.assertEqual(a, b)
+        self.assertEqual(a["written_by"], "fallback")
+        self.assertGreaterEqual(len(a["shots"]), 2)
+
+    def test_from_task_uses_user_plan_without_calling_llm(self):
+        task = Task("STORYBOARD", input={"plan": {"shots": [{"prompt": "x"}], "written_by": "user"}})
+        self.assertEqual(story.from_task(task, None)["written_by"], "user")
+
+
+class PlannerCameraTest(unittest.TestCase):
+    """分镜 → 任务：运镜/场次/角色/空镜都要真的落到任务约束上。"""
+
+    PLAN = {"title": "雪地柯基", "written_by": "llm", "total_duration": 10.0,
+            "scenes": [{"key": "s1", "name": "雪原"}, {"key": "s2", "name": "小径"}],
+            "shots": [{"n": 1, "prompt": "柯基在雪原奔跑", "duration": 5, "camera": "push_in",
+                       "speed": "slow", "cast": ["柯基"], "scene": "s1"},
+                      {"n": 2, "prompt": "蝴蝶停在鼻尖", "duration": 5, "camera": "static",
+                       "speed": "normal", "cast": [], "scene": "s2"}]}
+
+    def test_shots_carry_camera_and_scene(self):
+        state = ExecutionState(goal="雪地柯基")
+        tasks = planner_mod.tasks_from_plan(self.PLAN, state, None, include_storyboard=False)
+        shots = [t for t in tasks if t.action == "GENERATE_SHOT"]
+        self.assertEqual(len(shots), 2)
+        self.assertEqual(shots[0].constraints["camera"], "push_in")
+        self.assertEqual(shots[0].constraints["camera_speed"], "slow")
+        self.assertEqual(shots[0].constraints["scene"], "s1")
+        self.assertEqual(shots[1].constraints["scene"], "s2")
+        self.assertEqual(shots[1].constraints["cast"], "none")   # 空镜：不查角色
+        scenes = {t.constraints.get("scene_key") for t in tasks if t.action == "GENERATE_SCENE"}
+        self.assertEqual(scenes, {"s1", "s2"})                   # 两场戏各出一张场景
+
+    def test_compose_knows_shot_scenes(self):
+        tasks = planner_mod.tasks_from_plan(self.PLAN, ExecutionState(goal="x"), None,
+                                       include_storyboard=False)
+        compose = next(t for t in tasks if t.action == "COMPOSE")
+        self.assertEqual(compose.input["scenes"], ["s1", "s2"])
+
+    def test_include_storyboard_adds_exactly_one(self):
+        tasks = planner_mod.tasks_from_plan(self.PLAN, ExecutionState(goal="x"), None)
+        self.assertEqual(len([t for t in tasks if t.action == "STORYBOARD"]), 1)
+
+    def test_story_planner_two_phases(self):
+        state = ExecutionState(goal="雪地柯基")
+        sp = planner_mod.StoryPlanner("雪地柯基")
+        first = sp.next_task(state)                     # 第一相：先写分镜
+        self.assertEqual(first.action, "STORYBOARD")
+        first.result = {"storyboard": self.PLAN}
+        first.status = TaskStatus.PASS
+        rest = []
+        while (t := sp.next_task(state)) is not None:
+            rest.append(t)
+        self.assertTrue(any(t.action == "GENERATE_SHOT" for t in rest))
+        self.assertFalse(any(t.action == "STORYBOARD" for t in rest))   # 不重复跑分镜
+
+    def test_story_planner_hands_over_when_storyboard_fails(self):
+        class Fallback:
+            used = False
+            def next_task(self, state):
+                self.used = True
+                return Task("COMPOSE")
+        fb = Fallback()
+        sp = planner_mod.StoryPlanner("目标", fallback=fb)
+        state = ExecutionState(goal="目标")
+        sb = sp.next_task(state)
+        sb.status = TaskStatus.FAIL
+        self.assertEqual(sp.next_task(state).action, "COMPOSE")
+        self.assertTrue(fb.used)
+
+
+# ---------------------------------------------------------------- 产物下载头
+class ContentDispositionTest(unittest.TestCase):
+    """中文文件名必须走 RFC 5987：http.server 的头部只能 latin-1。
+
+    踩过的坑（真机）：`filename="柯基.png"` 会在 send_header 里抛 UnicodeEncodeError，
+    产物在面板里直接打不开（项目名/角色键是中文时必然触发）。
+    """
+
+    def test_chinese_name_is_percent_encoded(self):
+        from hxmv.server import content_disposition
+        header = content_disposition("asset_柯基.png")
+        self.assertIn("filename*=UTF-8''", header)
+        header.encode("latin-1")          # 关键：这个头必须能进 HTTP 响应
+
+    def test_ascii_name_keeps_a_readable_fallback(self):
+        from hxmv.server import content_disposition
+        header = content_disposition("final_ab12.mp4")
+        self.assertIn('filename="final_ab12.mp4"', header)
+        header.encode("latin-1")
+
+    def test_weird_chars_do_not_break_the_header(self):
+        from hxmv.server import content_disposition
+        for name in ("我 的 片.mp4", "a\"b.mp4", "../x.mp4", ""):
+            with self.subTest(name=name):
+                header = content_disposition(name)
+                header.encode("latin-1")
+                self.assertIn("filename=", header)

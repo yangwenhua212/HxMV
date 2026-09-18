@@ -572,7 +572,9 @@ const FAILURES = {
   low_volume: "音量过低", no_audio: "缺音轨（任务要了音频）", character_inconsistency: "角色不一致", scene_inconsistency: "场景不一致",
   semantic_mismatch: "与剧本不符", frozen_frame: "画面静止", too_short: "时长不足", too_long: "超时长",
   // v0.8 由 ffmpeg 直接量出来的三类（漏了这几个键，界面就会直接显示英文缺陷名）
-  blurry: "画面模糊", multi_shot: "模型自己剪了镜头", silent_audio: "有音轨但全程静音"
+  blurry: "画面模糊", multi_shot: "模型自己剪了镜头", silent_audio: "有音轨但全程静音",
+  // v0.9 运镜与接缝（同样：不翻译就会在界面上直接冒出英文键名）
+  camera_mismatch: "运镜与规格不符", seam_jump: "同场戏接缝跳变"
 };
 const SUGGESTIONS = {
   increase_reference_strength: "加强参考", reduce_motion_scale: "减小运动幅度",
@@ -581,7 +583,14 @@ const SUGGESTIONS = {
   trim_duration: "裁时长", rewrite_prompt_closer: "贴合剧本",
   rewrite_prompt_action: "锁死动作", rewrite_prompt_emotion: "锁死情绪",
   rewrite_prompt_continuity: "补衔接", rewrite_prompt_sharp: "锁清晰度",
-  rewrite_prompt_single_shot: "锁单镜头"
+  rewrite_prompt_single_shot: "锁单镜头",
+  rewrite_prompt_camera: "锁运镜方向", boost_camera_amount: "加大运镜幅度", smooth_transition: "接缝加转场"
+};
+// 运镜规格 → 人话（分镜/实测展示用；内核只认英文枚举）
+const CAMERA_ZH = {
+  push_in: "推近", pull_out: "拉远", pan_left: "左摇", pan_right: "右摇",
+  track_left: "左移", track_right: "右移", tilt_up: "上摇", tilt_down: "下摇",
+  crane_up: "升镜", crane_down: "降镜", orbit: "环绕", handheld: "手持", follow: "跟拍", static: "固定"
 };
 const zh = (d, k, fb) => d[k] || fb || k;
 const fmt = t => new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false });
@@ -701,16 +710,28 @@ function criticHtml(ev) {
     + (ev.detail ? `<div class="sub dim">🔍 ${esc(ev.detail)}</div>` : "");
 }
 
+/** 分镜块：HxMV 自己写的剧情长什么样（决策事件带 storyboard） */
+function sbHtml(sb) {
+  if (!sb || !sb.shots) return "";
+  const who = sb.written_by === "llm" ? "自己写" : (sb.written_by === "user" ? "照你的剧本" : "模板兜底");
+  const rows = sb.shots.map(s => `<div class="sub">镜${s.n} · ${CAMERA_ZH[s.camera] || s.camera || "固定"}`
+    + `${s.speed && s.speed !== "normal" ? "（" + (s.speed === "slow" ? "慢" : "快") + "）" : ""}`
+    + ` · ${s.duration}s · ${esc(s.prompt || "")}</div>`).join("");
+  return `<div class="sub" style="margin-top:6px"><b>《${esc(sb.title || "")}》</b> ${esc(sb.logline || "")}`
+    + ` <span class="dim">（${who} · ${sb.shots.length} 镜 / ${sb.total_duration || "?"}s）</span></div>${rows}`;
+}
+
 function decisionHtml(ev) {
   const map = { PASS: ["通过", "green"], RETRY: ["修正后重试", "amber"], FAIL: ["失败", "red"] };
   const [label, cls] = map[ev.decision] || [ev.decision, "gray"];
   let extra = "";
+  if (ev.storyboard) extra += sbHtml(ev.storyboard);
   if (ev.decision === "PASS" && ev.fixes_applied?.length) {
-    extra = `<div class="sub dim">已记住：${ev.fixes_applied.map(f => zh(FAILURES, f.failure) + "用" + zh(SUGGESTIONS, f.suggestion) + "修").join("、")}</div>`;
+    extra += `<div class="sub dim">已记住：${ev.fixes_applied.map(f => zh(FAILURES, f.failure) + "用" + zh(SUGGESTIONS, f.suggestion) + "修").join("、")}</div>`;
   } else if (ev.decision === "RETRY") {
-    extra = `<div class="sub dim">第 ${ev.attempts_used}/${ev.max_attempts} 次</div>`;
+    extra += `<div class="sub dim">第 ${ev.attempts_used}/${ev.max_attempts} 次</div>`;
   } else if (ev.decision === "FAIL") {
-    extra = `<div class="sub dim">多次修正仍未达标</div>`;
+    extra += `<div class="sub dim">多次修正仍未达标</div>`;
   }
   return `<div class="title"><span class="pill ${cls}">${label}</span></div>${extra}`;
 }

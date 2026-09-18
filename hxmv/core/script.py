@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import re
 
+from . import camera
+
 # 【0:00-0:20】 / 【00:00～00:20】 / 「0:00-0:20」
 _TIME_BLOCK = re.compile(r"[【\[]\s*(\d{1,2}:\d{2})\s*[-~～—－]\s*(\d{1,2}:\d{2})\s*[】\]](.*)")
 # 镜头一 / 镜头1 / 1. / ① 
@@ -105,8 +107,14 @@ def parse(text: str) -> dict | None:
             continue
         per = (blk["span"] / len(texts)) if blk["span"] else 5.0
         for t in texts:
-            shots.append({"prompt": f"{blk['title']}。{t}".strip("。 "),
-                          "duration": max(2.0, round(per, 1))})
+            # 运镜归 camera 规格（判据要方向/幅度），画面描述里剥掉运镜词——两者混在一起
+            # 时，提示词里既有"缓慢推近"又有一句通用运镜，模型只能猜（实测运镜全靠运气）。
+            cam = camera.parse(t) or {}
+            body = camera.strip(t) or t
+            shots.append({"prompt": f"{blk['title']}。{body}".strip("。 "),
+                          "duration": max(2.0, round(per, 1)),
+                          "camera": cam.get("move"), "speed": cam.get("speed"),
+                          "raw": t})
 
     if len(shots) < 2:                # 拆不出多镜头 → 不当剧本处理，交给 LLM
         return None

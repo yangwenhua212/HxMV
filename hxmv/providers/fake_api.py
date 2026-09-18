@@ -15,10 +15,13 @@ import time
 
 from .base import ProviderError, VideoProvider
 
+from ..core import camera
+
 
 class FakeApiProvider(VideoProvider):
     name = "fake"
     parallel_safe = True      # 纯仿真、不落产物文件，天然可并发
+    camera_support = {camera.CAP_PROMPT}   # 仿真端点：运镜只能走提示词
 
     action_map = {"GENERATE_SHOT": "text2video", "GENERATE_SCENE": "image",
                   "GENERATE_CHARACTER": "image"}

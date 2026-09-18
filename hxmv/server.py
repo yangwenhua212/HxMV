@@ -88,6 +88,21 @@ MEDIA_EXTS = (".mp4", ".png", ".jpg", ".jpeg", ".webp")
 PROVIDERS = {"mock": "", "fake": "fake", "local": "local", "zhipu": "zhipu", "kling": "kling"}
 
 
+
+def content_disposition(name: str) -> str:
+    """产物下载头：**中文文件名必须走 RFC 5987 编码**。
+
+    踩过的坑（真机）：`http.server` 的头部只能 latin-1 —— 直接 `filename="柯基.png"`
+    会在 `send_header` 里抛 UnicodeEncodeError，整个请求 500、产物在面板里"打不开"
+    （项目名/角色键是中文时必然触发，实测日志里一堆这种堆栈）。
+    做法：`filename` 给一个 ASCII 兜底名，真名放 `filename*=UTF-8''<百分号编码>`，
+    浏览器/播放器认后者。
+    """
+    from urllib.parse import quote
+    ascii_name = re.sub(r'[^A-Za-z0-9._-]', "_", str(name)) or "file"
+    return f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(str(name))}"
+
+
 class RunRecorder:
     """一个 run 的事件收容：append 内存 + 落盘 jsonl + 广播给 SSE 订阅者。"""
 
@@ -686,7 +701,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
                 self.send_header("Content-Length", str(length))
-                self.send_header("Content-Disposition", f'inline; filename="{name}"')
+                self.send_header("Content-Disposition", content_disposition(name))
                 self.end_headers()
                 with open(path, "rb") as f:
                     f.seek(start)
@@ -698,7 +713,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Disposition", f'inline; filename="{name}"')
+            self.send_header("Content-Disposition", content_disposition(name))
             self.end_headers()
             self.wfile.write(body)
             return

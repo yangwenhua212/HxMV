@@ -34,6 +34,7 @@ import time
 
 from ..media import probe
 from .base import ProviderError, VideoProvider
+from ..core import camera
 from ..core.project import Project, fingerprint, fp_params
 
 # 低端生成器基线（低于 L1 阈值 → 首轮必然被量出真实缺陷）
@@ -47,7 +48,9 @@ DRIFT_SAT_RANGE = 0.8    # (1-strength) × 该值 = 饱和度衰减
 DRIFT_NOISE = 50.0       # (1-strength) × 该值 = 噪点强度
 DRIFT_BRIGHT = 0.12      # (1-strength) × 该值 = 亮度偏移（保证任何配色都能被量出漂移）
 DRIFT_CONTRAST = 0.25    # (1-strength) × 该值 = 对比度衰减
-MOTION_ZOOM = 1.15       # 有运镜时的固定推镜倍数（给平移留出余量）
+MOTION_ZOOM = 1.15       # 推/拉的中点缩放（也是"有运动"时的默认中点）
+PAN_ZOOM = 1.35          # 平移类运镜的裁切缩放：给横移/俯仰留出足够的位移余量
+                         # （1.15 只留 6.5% 画面宽，量出来不到 1px，判据会误判"没动"）
 BLACK_HEAD_SECONDS = 0.3  # 片头全黑段（未被 trim_black 修掉时真的会出现黑帧）
 
 # 并发镜头会同时要**同一张**参考图 / 基线帧 / 漂移图（同名同路径），
@@ -108,6 +111,8 @@ _PALETTE = [
 
 class LocalRenderProvider(VideoProvider):
     name = "local"
+    # 运镜落点：本地自己渲染 —— 推/拉/摇/移/升降都能真画出来（免费、可判据标定）
+    camera_support = {camera.CAP_RENDER}
     # 产物按 task_id 命名互不冲突；共用路径（参考图/基线帧/漂移图）由 _FILE_LOCK 串行化
     parallel_safe = True
     action_map = {"GENERATE_SHOT": "render", "GENERATE_SCENE": "render",
@@ -212,25 +217,30 @@ class LocalRenderProvider(VideoProvider):
                 return self._render_asset(task, str(key), field), field
         return None, None
 
-    def _baseline_frame(self, ref: str, w: int, hgt: int) -> str:
+    def _baseline_frame(self, ref: str, w: int, hgt: int, zoom: float = MOTION_ZOOM) -> str:
         """零漂移基线帧：参考图走**和镜头一样的编码管线**（同分辨率/同 CRF）后的画面。
 
         为什么不能直接拿参考图当基线：PNG 参考图 vs h264 解出来的帧之间有一层编码差异
         （高频细节被压掉），实测\"零漂移\"也能差出 0.12——那 0.12 会被误算成\"不一致\"。
         走同一条管线，量出来的距离才真正反映漂移本身。
+
+        `zoom` = **这个镜头自己的中点缩放**（推/拉=1.15，平移/俯仰=1.35）：一致性在 50% 处
+        采样，那一刻的裁切窗口是居中的，缩放即中点值 —— 基线按同一个值做，几何才严格对齐
+        （不对齐时同样差 0.12，实测踩过）。
         """
+        tag = "" if abs(zoom - MOTION_ZOOM) < 1e-6 else f"_z{round(zoom * 100)}"
         path = os.path.join(self.outdir,
-                            f"base_{w}x{hgt}_{os.path.splitext(os.path.basename(ref))[0]}.png")
+                            f"base_{w}x{hgt}{tag}_{os.path.splitext(os.path.basename(ref))[0]}.png")
         if os.path.exists(path):
             return path
         with _FILE_LOCK:            # 锁内复查：并发的另一个镜头可能刚把这张基线做好
             if os.path.exists(path):
                 return path
             tmp = os.path.join(self.outdir,
-                               f"_basetmp_{w}x{hgt}_{os.path.splitext(os.path.basename(ref))[0]}.mp4")
+                               f"_basetmp_{w}x{hgt}{tag}_{os.path.splitext(os.path.basename(ref))[0]}.mp4")
             # 居中裁切（x/y 都取正中）= 运镜在 50% 时刻的画面几何，与一致性采样点对齐
             self._ff(["-loop", "1", "-i", ref, "-frames:v", "1",
-                      "-vf", (f"zoompan=z='{MOTION_ZOOM}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                      "-vf", (f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                               f":d=1:s={w}x{hgt},format=yuv420p"),
                       *probe.encoder_args(26), tmp])
             self._ff(["-i", tmp, "-frames:v", "1", path])
@@ -291,23 +301,67 @@ class LocalRenderProvider(VideoProvider):
 
         source = self._drift_image(ref, strength)   # 强度越低 → 漂移越大 → L2 能真的量到
 
-        # 运镜：**平移为主 + 固定小推镜**（不是从零开始的余弦推镜——那种起步 1 秒内几乎
-        # 不动，会被 freezedetect 正确地判成"画面静止"，实测踩过）。
-        # 平移的每帧位移 ∝ 幅度×周期数，稳定高于检测阈值；motion_scale=0 → 真静止（可被检出）。
+        # 运镜（v0.9）：按**镜头规格**真画出推/拉/摇/移/升降/环绕/手持/固定 ——
+        # 不再是"所有镜头同一个固定平移 + 小推镜"。三条不变量（破坏任一条，既有标定全部作废）：
+        #  ① 中点（50%）几何 = 居中裁切 + 中点缩放 MOTION_ZOOM（base 帧按它做，L2 在 50% 采样）；
+        #  ② 平移/俯仰走**线性单向**（不是正弦来回）——判据要方向，来回摆的符号会自相矛盾；
+        #  ③ motion_scale≈0 或 camera=static → 真静止（刻意如此：freezedetect 要能量出来）。
+        move = camera.normalize_move(cons.get("camera")) or camera.MOVE_PUSH_IN
+        speed = str(cons.get("camera_speed") or camera.DEFAULT_SPEED)
+        if speed not in camera.SPEEDS:
+            speed = camera.DEFAULT_SPEED
+        amount = camera.clamp_amount(cons.get("camera_amount"))
+        if motion <= 0.05:
+            move = camera.MOVE_STATIC                       # 没给运动量 → 真的是静止镜头
         frames = max(2, int(duration * fps))
-        if motion > 0.05:
-            cycles = max(2, int(round(duration / 1.5)))     # 5s 视频 ≈ 3 个来回
-            amp = min(1.0, motion) * 0.4                    # 占可用平移余量的比例
-            room_x, room_y = "(iw-iw/zoom)/2", "(ih-ih/zoom)/2"
-            z = f"{MOTION_ZOOM}"
-            # 两条正弦都从 0 出发，且周期成整数倍 → 在 0%、50%、100% 处偏移刚好归零。
-            # 这点很关键：一致性检测在 50% 处采样，此时画面正好是\"居中裁切\"，
-            # 与零漂移基线帧的几何完全对齐——量出来的差就只剩漂移本身（实测踩过不对齐的坑）。
-            x = f"iw/2-(iw/zoom/2)+{room_x}*{amp:.3f}*sin(2*PI*{cycles}*on/{frames})"
-            y = f"ih/2-(ih/zoom/2)+{room_y}*{amp:.3f}*sin(2*PI*{2 * cycles}*on/{frames})"
-            chain = [f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={w}x{hgt}:fps={fps}"]
+        # 幅度 ∝ motion_scale（Refiner 的 increase_motion_scale 靠它修 frozen_frame） × amount
+        amp = min(1.0, motion) * (0.4 + 0.6 * amount)
+        # 中点缩放：推/拉在中点正好是 MOTION_ZOOM（线性斜坡）；平移类用更大的 PAN_ZOOM
+        # 换位移余量。base 帧按**每个镜头自己的中点缩放**做，50% 处的几何才严格对齐。
+        z_mid = MOTION_ZOOM if move in (camera.MOVE_PUSH_IN, camera.MOVE_PULL_OUT,
+                                        camera.MOVE_STATIC) else PAN_ZOOM
+        z_lo, z_hi = 1.0, 2 * MOTION_ZOOM - 1.0
+        cx, cy = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+        room_x, room_y = "(iw-iw/zoom)/2", "(ih-ih/zoom)/2"
+        t = f"(on/{frames})"
+        realization = "render"
+        if move == camera.MOVE_STATIC:
+            # 固定机位 ≠ 一帧不变：真实拍摄里还有人手呼吸、被摄体自身的动静。
+            # 完全静止会被 freezedetect（正确地）判成 frozen_frame，而这个缺陷在固定机位下
+            # 修无可修 → 白挨一轮重试。给 ±1.5% 的呼吸式缩放（2 个周期，每帧变化够快才不会被
+            # 判静止；**不能低于 1.0**：zoompan 的 z<1 会被钳住 → 反而真的静止，实测踩过）。
+            # 中点仍是 z_mid，与 baseline 帧的几何严格对齐（0.5 处 sin=0）。
+            z_expr = f"{z_mid}+0.015*sin(2*PI*2*{t})"
+            x_expr, y_expr = cx, cy
+            realization = "render"
         else:
-            chain = [f"zoompan=z='1.0':d={frames}:s={w}x{hgt}:fps={fps}"]
+            ramp = f"({t}-0.5)*2"                            # -1 → 0 → +1（中点归零）
+            # 推/拉的缩放走 **smoothstep**（中点处斜率最大 1.5×线性、两端平缓）：
+            # 线性斜坡每帧只变 0.2%，freezedetect 会（正确地）判成"画面静止"→ 白挨一轮 frozen_frame。
+            # smoothstep 中点仍是 1.15（与基线对齐），但中段每帧 0.6% → 量得出来。
+            ease = f"({t})*({t})*(3-2*({t}))"
+            z_expr = {"push_in": f"{z_lo}+{z_hi - z_lo:.3f}*{ease}",
+                      "pull_out": f"{z_hi}-{z_hi - z_lo:.3f}*{ease}"}.get(move, f"{z_mid}")
+            sign_x = {"pan_right": 1, "pan_left": -1, "track_right": 1, "track_left": -1}.get(move)
+            sign_y = {"tilt_down": 1, "tilt_up": -1, "crane_down": 1, "crane_up": -1}.get(move)
+            swing = f"sin(2*PI*{t})"
+            shake = f"sin(2*PI*4*{t})"
+            x_expr = cx
+            y_expr = cy
+            if sign_x:
+                x_expr = f"{cx}+{room_x}*{amp:.3f}*({sign_x})*({ramp})"
+            elif move in (camera.MOVE_ORBIT, camera.MOVE_FOLLOW):
+                # 环绕/跟拍没有真三维信息可用 → 用"横移 + 轻微缩放"近似，并**如实标注**是近似
+                z_expr = f"{z_mid}+0.05*{swing}" if move == camera.MOVE_ORBIT else f"{z_mid}"
+                x_expr = f"{cx}+{room_x}*{amp:.3f}*({swing})"
+                realization = "render_approx"
+            elif move == camera.MOVE_HANDHELD:
+                x_expr = f"{cx}+{room_x}*{amp:.3f}*0.6*({shake})"
+                y_expr = f"{cy}+{room_y}*{amp:.3f}*0.6*({shake})"
+                realization = "render_approx"
+            if sign_y:
+                y_expr = f"{cy}+{room_y}*{amp:.3f}*({sign_y})*({ramp})"
+        chain = [f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{hgt}:fps={fps}"]
         # 片头黑场：低端生成器的坏习惯；Refiner 要求 trim_black 时就不再产生（真修好）。
         # 判据只与 (task_id, seed) 有关、不含 attempts：同一任务的坏习惯跨重生成是**稳定**的，
         # 必须显式要求 trim_black 才消除（否则缺陷在重试间忽有忽无，闭环学不到因果）。
@@ -328,11 +382,13 @@ class LocalRenderProvider(VideoProvider):
         self._slot_bind(task, path, fp)
         result = {
             "media": path, "reference": ref, "reference_kind": kind,
-            "reference_baseline": self._baseline_frame(ref, w, hgt),
+            "reference_baseline": self._baseline_frame(ref, w, hgt, zoom=z_mid),
             "duration": duration, "fps": fps, "resolution": f"{w}x{hgt}",
             "params": {"provider": self.name, "seed": task.input.get("seed"),
                        "reference_strength": strength, "motion_scale": motion,
                        "audio_gain_db": gain_db, "black_fade": fade,
+                       "camera": move, "camera_speed": speed,
+                       "camera_amount": amount, "camera_realization": realization,
                        "trim_black": bool(task.input.get("trim_black"))},
             "reused": False, "fingerprint": fp,
             "cost_units": self.estimate_cost(task.action),
@@ -346,7 +402,8 @@ class LocalRenderProvider(VideoProvider):
                                                     "fps", "audio_gain_db", "trim_black")},
                 task_constraints={k: cons.get(k) for k in ("character", "scene", "style",
                                                            "reference_strength", "scene_strength",
-                                                           "motion_scale")})
+                                                           "motion_scale", "camera",
+                                                           "camera_speed", "camera_amount")})
         return result
 
     def _slot_bind(self, task, path: str | None = None, fp: str | None = None) -> None:
@@ -389,10 +446,12 @@ class LocalRenderProvider(VideoProvider):
         # （黑场来自镜头自带的渐入——镜头层没修掉的，成片层还能补一刀。）
         trim = probe.leading_black_seconds(paths[0]) if task.input.get("trim_black") else 0.0
 
-        # ---- 成片指纹：镜头位画面 + 裁剪要求一致 → 复用已有成片，不重新拼接 ----
+        # ---- 成片指纹：镜头位画面 + 裁剪要求 + 转场一致 → 复用已有成片，不重新拼接 ----
+        # 转场必须进指纹：加了淡入淡出却没有重拼，等于"修了等于没修"（同 with_audio 那类老坑）。
         fp = fingerprint({"prompt": "compose|" + "|".join(
             self._shot_fp.get(i + 1, os.path.basename(p)) for i, p in enumerate(paths)),
-            "trim_black": bool(task.input.get("trim_black"))})
+            "trim_black": bool(task.input.get("trim_black")),
+            "transition": str(task.input.get("transition") or "")})
         if self.project:
             hit = self.project.shot(fp)
             if hit:
@@ -411,18 +470,40 @@ class LocalRenderProvider(VideoProvider):
                 parts.append(f"[{i}:a]{cut_a}aresample=44100[a{i}]")
                 as_.append(f"[a{i}]")
         n = len(paths)
-        parts.append(f"{''.join(vs)}concat=n={n}:v=1:a=0[vout]")
+        aout = ""                     # 只有 has_audio 才会被赋值/使用（下面两个分支各赋一次）
+        # 转场（v0.9）：同场戏接缝被判 seam_jump 时，Refiner 会要求 transition=fade。
+        # 这是**真的动作**：剪辑点从硬切变成 0.4s 交叉淡化，量出来的接缝相似度真的会上去。
+        fade = 0.4 if (str(task.input.get("transition") or "") == "fade" and n > 1) else 0.0
+        durations = [float((probe.probe_container(p) or {}).get("duration") or 0.0) for p in paths]
+        if fade > 0.1:
+            parts.append(f"[v0][v1]xfade=transition=fade:duration={fade}:offset={max(0.0, durations[0] - fade):.3f}[vx1]")
+            offset = durations[0] - fade
+            for i in range(2, n):
+                offset += max(0.0, durations[i - 1] - fade)
+                parts.append(f"[vx{i - 1}][v{i}]xfade=transition=fade:duration={fade}"
+                             f":offset={offset:.3f}[vx{i}]")
+            vout = f"[vx{n - 1}]"
+        else:
+            parts.append(f"{''.join(vs)}concat=n={n}:v=1:a=0[vout]")
+            vout = "[vout]"
         if has_audio:
-            parts.append(f"{''.join(as_)}concat=n={n}:v=0:a=1[aout]")
+            if fade > 0.1:
+                parts.append(f"[a0][a1]acrossfade=d={fade}[ax1]")
+                for i in range(2, n):
+                    parts.append(f"[ax{i - 1}][a{i}]acrossfade=d={fade}[ax{i}]")
+                aout = f"[ax{n - 1}]"
+            else:
+                parts.append(f"{''.join(as_)}concat=n={n}:v=0:a=1[aout]")
+                aout = "[aout]"
         graph = ";".join(parts)
 
         out = os.path.join(self.outdir, f"final_{task.task_id}.mp4")
         args = []
         for p in paths:
             args += ["-i", p]
-        args += ["-filter_complex", graph, "-map", "[vout]"]
+        args += ["-filter_complex", graph, "-map", vout]
         if has_audio:
-            args += ["-map", "[aout]", "-c:a", "aac"]
+            args += ["-map", aout, "-c:a", "aac"]
         args += [*probe.encoder_args(24), "-pix_fmt", "yuv420p", out]
         self._ff(args)
 
@@ -438,7 +519,11 @@ class LocalRenderProvider(VideoProvider):
                   "duration": cont.get("duration"), "trimmed_black": trim,
                   "reused": False, "fingerprint": fp,
                   "audio": audio_info,
+                  "transition": "fade" if fade > 0.1 else None,
                   "cost_units": self.estimate_cost(task.action)}
+        if fade > 0.1:
+            # 交叉淡化会吃掉 (n-1)×fade 的时长：预期时长要按**实际**算，否则白挨一轮 too_short
+            result["expected_duration"] = round(max(0.5, sum(durations) - fade * (n - 1)), 2)
         if audio_info and audio_info.get("expected_duration"):
             result["expected_duration"] = audio_info["expected_duration"]
         if self.project:
@@ -453,8 +538,9 @@ class LocalRenderProvider(VideoProvider):
     # ---------- 入口 ----------
     def generate(self, task) -> dict:
         if task.action == "STORYBOARD":
-            goal = task.input.get("goal", "")
-            return {"storyboard": [f"镜头 {i}: {goal[:20]}" for i in (1, 2)],
+            # 真编剧（不在 provider 里另写一套）：provider 直连时也走同一个 story 模块
+            from ..core import story
+            return {"storyboard": story.from_task(task, self.project),
                     "cost_units": self.estimate_cost(task.action)}
         if task.action in ("GENERATE_CHARACTER", "GENERATE_SCENE"):
             kind = "character" if task.action == "GENERATE_CHARACTER" else "scene"
