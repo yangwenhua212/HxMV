@@ -68,6 +68,16 @@ def _walk(root: str) -> list[str]:
     return found
 
 
+# 明显的占位符/测试假值：测试里必须能写「形状像 key 但其实不是」的串，
+# 否则守形状的测试自己会被这条规则拦下（收窄规则，而不是关掉整条检查）。
+PLACEHOLDER_MARKERS = ("test", "fake", "example", "placeholder", "your-", "xxxx", "abcd", "notreal", "dummy")
+
+
+def _is_placeholder(snippet: str) -> bool:
+    low = snippet.lower()
+    return any(mark in low for mark in PLACEHOLDER_MARKERS)
+
+
 def scan(files: list[str]) -> list[tuple[str, int, str, str]]:
     """返回 [(文件, 行号, 命中类型, 片段)]。"""
     hits: list[tuple[str, int, str, str]] = []
@@ -85,6 +95,8 @@ def scan(files: list[str]) -> list[tuple[str, int, str, str]]:
             continue
         for label, rx in PATTERNS:
             for m in rx.finditer(text):
+                if _is_placeholder(m.group(0)):
+                    continue
                 hits.append((path, text[:m.start()].count("\n") + 1, label, m.group(0)[:80]))
     return hits
 

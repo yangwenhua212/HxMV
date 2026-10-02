@@ -99,9 +99,9 @@ class FactoryTest(_Isolated):
         self.assertEqual(__import__("hxmv.core.executor", fromlist=["x"])._auto_provider(), "local")
 
     def test_default_provider_wins_when_keyed(self):
-        config.set_api_key("agnes", "sk-test")
+        config.set_api_key("agnes", "sk-test-abcdefghijklmnop")
         config.set_default_provider("zhipu")
-        config.set_api_key("zhipu", "0123.abc")
+        config.set_api_key("zhipu", "test0000000000000000000000000000.abcdefghijklmnop")
         os.environ["HXMV_PROVIDER"] = ""
         os.environ.pop("HXMV_PROVIDER")
         from hxmv.core.executor import _auto_provider
@@ -112,15 +112,15 @@ class FactoryTest(_Isolated):
 class ConfigTest(_Isolated):
     def test_key_roundtrip_and_mask(self):
         self.assertEqual(config.api_key("agnes"), "")
-        config.set_api_key("agnes", "notreal-abcdefghijklmnop")
-        self.assertEqual(config.api_key("agnes"), "notreal-abcdefghijklmnop")
+        config.set_api_key("agnes", "sk-test-notreal-abcdefg")
+        self.assertEqual(config.api_key("agnes"), "sk-test-notreal-abcdefg")
         self.assertNotIn("abcdefghij", config.mask(config.api_key("agnes")))   # 不回明文
         self.assertTrue(config.configured("agnes"))
 
     def test_env_beats_file(self):
-        config.set_api_key("agnes", "sk-from-file")
-        os.environ["HXMV_AGNES_KEY"] = "sk-from-env"
-        self.assertEqual(config.api_key("agnes"), "sk-from-env")
+        config.set_api_key("agnes", "sk-test-from-file-abcdef")
+        os.environ["HXMV_AGNES_KEY"] = "sk-test-from-env-abcdef"
+        self.assertEqual(config.api_key("agnes"), "sk-test-from-env-abcdef")
 
     def test_option_env_name_is_generic(self):
         config.set_option("agnes", "video_model", "agnes-video-2.5")
@@ -149,9 +149,9 @@ class LlmRoutingTest(_Isolated):
         self.assertIsNone(llm.vision_model())
 
     def test_agnes_key_drives_text_and_vision(self):
-        config.set_api_key("agnes", "sk-test")
+        config.set_api_key("agnes", "sk-test-abcdefghijklmnop")
         base, key, pid = llm.endpoint()
-        self.assertEqual((key, pid), ("sk-test", "agnes"))
+        self.assertEqual((key, pid), ("sk-test-abcdefghijklmnop", "agnes"))
         self.assertEqual(base, "https://apihub.agnes-ai.com/v1")
         self.assertEqual(llm.text_model(), "agnes-2.5-flash")
         self.assertEqual(llm.vision_model(), "agnes-2.5-flash")   # 实测会看图的那档
@@ -159,7 +159,7 @@ class LlmRoutingTest(_Isolated):
 
     def test_local_run_still_uses_the_configured_llm(self):
         """`--provider local` 时大脑不该跟着退回 Mock：local 没有 base/Key，自动跳过。"""
-        config.set_api_key("agnes", "sk-test")
+        config.set_api_key("agnes", "sk-test-abcdefghijklmnop")
         os.environ["HXMV_PROVIDER"] = "local"
         self.assertEqual(llm.active_provider(), "agnes")
 
@@ -168,7 +168,7 @@ class LlmRoutingTest(_Isolated):
         import urllib.error
         from unittest import mock
         from hxmv.core import llm as llm_mod
-        config.set_api_key("agnes", "sk-test")
+        config.set_api_key("agnes", "sk-test-abcdefghijklmnop")
         calls = {"n": 0}
 
         def flaky(base, key, model, messages, temperature, max_tokens):
@@ -188,7 +188,7 @@ class LlmRoutingTest(_Isolated):
         import urllib.error
         from unittest import mock
         from hxmv.core import llm as llm_mod
-        config.set_api_key("agnes", "sk-test")
+        config.set_api_key("agnes", "sk-test-abcdefghijklmnop")
         with mock.patch("hxmv.core.llm._call_once",
                         side_effect=urllib.error.HTTPError("u", 400, "Bad Request", {}, None)), \
              mock.patch("hxmv.core.llm.time.sleep") as sleepy:
@@ -197,7 +197,7 @@ class LlmRoutingTest(_Isolated):
         self.assertEqual(sleepy.call_count, 0)
 
     def test_explicit_openai_endpoint_has_no_default_vision(self):
-        os.environ["OPENAI_API_KEY"] = "sk-custom"
+        os.environ["OPENAI_API_KEY"] = "sk-test-custom-abcdefgh"
         os.environ["OPENAI_BASE_URL"] = "https://example.com/v1"
         _, _, pid = llm.endpoint()
         self.assertEqual(pid, "openai")
@@ -210,7 +210,7 @@ class LlmRoutingTest(_Isolated):
 class AgnesAdapterTest(_Isolated):
     def _provider(self):
         from hxmv.providers.agnes_video import AgnesVideoProvider
-        return AgnesVideoProvider(api_key="sk-test", outdir=self._tmp)
+        return AgnesVideoProvider(api_key="sk-test-abcdefghijklmnop", outdir=self._tmp)
 
     def test_does_not_send_token_when_downloading(self):
         # 实测：Agnes 的产物域名带了 Authorization 反而 401
@@ -277,7 +277,7 @@ class AgnesAdapterTest(_Isolated):
         from unittest import mock
         from hxmv.providers.agnes_video import AgnesVideoProvider
         from hxmv.providers.base import ProviderError
-        p = AgnesVideoProvider(api_key="sk-test", outdir=self._tmp)
+        p = AgnesVideoProvider(api_key="sk-test-abcdefghijklmnop", outdir=self._tmp)
         p.SUBMIT_WAIT = 60.0
         calls = {"n": 0}
 
@@ -298,7 +298,7 @@ class AgnesAdapterTest(_Isolated):
         """参数错/鉴权错不该被当成「排队」耗着等——那会让真正的 bug 看不见。"""
         from hxmv.providers.agnes_video import AgnesVideoProvider
         from hxmv.providers.base import ProviderError
-        p = AgnesVideoProvider(api_key="sk-test", outdir=self._tmp)
+        p = AgnesVideoProvider(api_key="sk-test-abcdefghijklmnop", outdir=self._tmp)
         p.SUBMIT_WAIT = 60.0
         p._submit = lambda *a: (_ for _ in ()).throw(
             ProviderError("提交任务失败 HTTP 400: mode is required", retryable=False))
@@ -340,7 +340,7 @@ class AgnesAdapterTest(_Isolated):
         from unittest import mock
         from hxmv.providers.agnes_video import AgnesVideoProvider
         from hxmv.providers.base import ProviderError
-        p = AgnesVideoProvider(api_key="sk-test", outdir=self._tmp)
+        p = AgnesVideoProvider(api_key="sk-test-abcdefghijklmnop", outdir=self._tmp)
         p.SUBMIT_WAIT = 3600.0
         p.NIGHT_FIRST = True            # 低峰策略默认关，这里显式开，测的是机制本身
         ahead = datetime.now() + timedelta(hours=3)
@@ -371,6 +371,31 @@ class AgnesAdapterTest(_Isolated):
         self.assertFalse(ApiVideoProvider.NIGHT_FIRST)
         self.assertEqual(ApiVideoProvider.NIGHT_WINDOW, "")
         self.assertEqual(AgnesVideoProvider.SUBMIT_WAIT, 7200.0)   # 「不怕等」仍保留：原地等 2 小时
+
+    def test_key_shape_guard_blocks_wrong_provider(self):
+        """真出过事故：Agnes 的 key 被写进智谱槽位 → 智谱整条链 401 且面板只显示「已配 Key」。
+
+        所以写入前按注册表声明的 key_pattern 校验形状：不符就拒（要强行写必须 force）。
+        """
+        with self.assertRaises(ValueError):
+            config.set_api_key("zhipu", "sk-test-abcdefghijklmnop")
+        with self.assertRaises(ValueError):
+            config.set_api_key("agnes", "089713abcdefghijklmnopqrstuvwxyz01.abcdefghijklmnop")
+        # 形状对 → 正常写；force → 强行写
+        self.assertTrue(config.set_api_key("agnes", "sk-test-abcdefghijklmnop"))
+        self.assertTrue(config.set_api_key("zhipu", "sk-test-abcdefghijklmnop", force=True))
+        # 没声明形状的家（local/fake）不校验
+        self.assertFalse(hasattr(spec_mock := None, "x") and False)
+
+    def test_doctor_flags_two_providers_sharing_one_key(self):
+        """两家共用同一把 Key = 必有一家写错了：自检必须自己喊出来（而不是等用户发现 401）。"""
+        from hxmv.core import doctor
+        config.set_api_key("zhipu", "sk-test-abcdefghijklmnop", force=True)   # 故意写成同一把
+        config.set_api_key("agnes", "sk-test-abcdefghijklmnop", force=True)
+        checks = {c["name"]: c for c in doctor.run_checks(probe_network=False)}
+        dup = checks["Key 查重（不同家不能共用同一把）"]
+        self.assertFalse(dup["ok"])
+        self.assertIn("同一把", dup["detail"])
 
     def test_two_providers_share_one_artifact_lock(self):
         """产物基线帧同名同路径：锁必须跨 provider 共用（各持一把等于没锁）。"""

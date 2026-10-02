@@ -35,6 +35,8 @@ class Spec:
     base_url: str = ""                          # OpenAI 兼容 base（LLM/视觉/生成共用同一家）
     env_base: str = ""                          # base 的环境变量覆盖名（测试指仿真端点用）
     key_hint: str = ""                          # 去哪拿 Key（面板/doctor 显示，别写文档链接）
+    key_pattern: str = ""                       # 那家 Key 的形状（正则）。守一道门：别把 A 家的 key 写进 B 家
+                                                # （真出过事故：智谱槽位被写成了 Agnes 的 key → 智谱整条链 401）
     needs_key: bool = True
     stub: bool = False                          # 适配器还没写完（只有骨架）：不进面板/自检，别让用户选了它
     models: dict[str, tuple[Model, ...]] = dataclasses.field(default_factory=dict)
@@ -82,6 +84,7 @@ _ZH = Spec(
     base_url="https://open.bigmodel.cn/api/paas/v4",
     env_base="HXMV_ZHIPU_BASE",
     key_hint="bigmodel.cn → 控制台 → API Keys（免费申请）",
+    key_pattern=r"^[0-9a-zA-Z]{32}\.[0-9a-zA-Z]{16}$",   # 智谱是「id.secret」点分形状
     models={
         "video": (Model("cogvideox-flash", "免费"),
                   Model("cogvideox-3", "1.05 元/次"),
@@ -101,6 +104,7 @@ _AGNES = Spec(
     base_url="https://apihub.agnes-ai.com/v1",
     env_base="HXMV_AGNES_BASE",
     key_hint="platform.agnes-ai.com → API Keys",
+    key_pattern=r"^sk-[A-Za-z0-9_\-]{16,}$",            # Agnes 是 sk- 开头的长串
     models={
         # flash 只出 720P、限免中；2.5 按秒计费（720P 0.025 美元/秒 ≈ 5 秒 ¥0.9）
         "video": (Model("agnes-video-2.5-flash", "限免 · 720P"),

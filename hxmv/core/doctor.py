@@ -95,6 +95,27 @@ def run_checks(probe_network: bool = True) -> list[dict]:
             "fix": "" if key else f"python3 -m hxmv --set-key {spec.id} <KEY>（{spec.key_hint}）",
         })
 
+    # Key 查重：两家用**同一把** key = 一定有一家写错了（真出过事故：智谱槽位被写成了 Agnes 的 key，
+    # 面板只说"已配 Key"、health 也 ready，但智谱那条链全 401——这种异常必须自己喊出来）
+    import hashlib as _hashlib
+    seen: dict[str, str] = {}
+    for spec in registry.api_specs():
+        k = config.api_key(spec.id)
+        if not k:
+            continue
+        fp = _hashlib.sha256(k.encode()).hexdigest()[:12]
+        if fp in seen:
+            checks.append({
+                "name": "Key 查重（不同家不能共用同一把）", "ok": False,
+                "detail": f"「{seen[fp]}」和「{spec.label}」用的是同一把 Key —— 一定有一家被写错了",
+                "fix": f"检查并重设：python3 -m hxmv --set-key {spec.id} <这家自己的 KEY>",
+            })
+            break
+        seen[fp] = spec.label
+    else:
+        checks.append({"name": "Key 查重（不同家不能共用同一把）", "ok": True,
+                       "detail": "各家 Key 互不相同", "fix": ""})
+
     # 视觉评审 = L2 身份判定 / L3 语义评审真看画面（没有它这两层是像素/文字兜底，别当成看过）
     checks.append({
         "name": "视觉评审（L2/L3 真看图）", "ok": llm.vision_available(),

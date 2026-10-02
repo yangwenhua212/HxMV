@@ -61,10 +61,29 @@ def api_key(provider: str) -> str:
     return str(key).strip()
 
 
-def set_api_key(provider: str, key: str) -> str:
-    """写入配置文件（返回脱敏后的回显，别把明文打到日志里）。"""
+def key_shape_ok(provider: str, key: str) -> bool:
+    """这把 key 的形状像不像这一家的？（注册表声明 key_pattern；没声明 = 不校验）"""
+    import re
+    spec = _spec(provider)
+    pat = getattr(spec, "key_pattern", "") if spec else ""
+    return bool(re.match(pat, key.strip())) if pat else True
+
+
+def set_api_key(provider: str, key: str, force: bool = False) -> str:
+    """写入配置文件（返回脱敏后的回显，别把明文打到日志里）。
+
+    形状不符直接拒绝（除非 force）：真出过事故——Agnes 的 key 被写进了智谱槽位，
+    智谱整条链（视频/出图/视觉）全 401，而且**表面看不出**（面板只会说"已配 Key"）。
+    宁可当场报错，也别让一把错的 key 悄悄躺进配置里。
+    """
+    key = key.strip()
+    if not key_shape_ok(provider, key) and not force:
+        spec = _spec(provider)
+        label = spec.label if spec else provider
+        raise ValueError(f"这把 Key 的形状不像「{label}」的（期望 {spec.key_pattern}）。"
+                         f"确认无误要强行写入，请显式加 force/--force。")
     data = load()
-    data.setdefault("providers", {}).setdefault(provider, {})["api_key"] = key.strip()
+    data.setdefault("providers", {}).setdefault(provider, {})["api_key"] = key
     save(data)
     return mask(key)
 

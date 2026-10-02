@@ -874,7 +874,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_err(400, f"不支持的 provider: {provider or '（空）'}")
                 return
             if str(body.get("key", "")).strip():
-                config.set_api_key(spec.id, str(body["key"]))
+                try:
+                    config.set_api_key(spec.id, str(body["key"]), force=bool(body.get("force")))
+                except ValueError as e:      # 形状不符：把话说清楚，别让错的 Key 躺进配置
+                    self._send_err(400, str(e))
+                    return
             for opt in spec.panel()["options"]:            # 档位名只认注册表（加一档不用改这里）
                 if opt["name"] in body:
                     config.set_option(spec.id, opt["name"], str(body.get(opt["name"], "")))

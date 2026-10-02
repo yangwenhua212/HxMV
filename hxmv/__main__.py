@@ -72,6 +72,8 @@ def main() -> int:
                            "想跑模拟世界请显式写 --provider mock")
     ap.add_argument("--set-key", nargs=2, default=None, metavar=("PROVIDER", "KEY"),
                     help="写入 API Key 到 ~/.hxmv/config.json（PROVIDER 见注册表，例：--set-key agnes <你的key>）")
+    ap.add_argument("--force", action="store_true",
+                    help="配合 --set-key：Key 形状与那家不符时也强行写入（默认拒绝，防写错家）")
     ap.add_argument("--default", default=None, metavar="PROVIDER",
                     help="选「默认用哪家」（面板里选的同一项）；不指定 provider 时按它生成")
     ap.add_argument("--key-status", action="store_true", help="查看各 provider 的 Key 是否已配置")
@@ -110,7 +112,11 @@ def main() -> int:
         if provider not in registry.SPECS:
             print(f"⚠ 未知 provider: {provider}（可选：{', '.join(sorted(registry.SPECS))}）")
             return 1
-        shown = config.set_api_key(provider, key)
+        try:
+            shown = config.set_api_key(provider, key, force=args.force)
+        except ValueError as e:
+            print(f"⚠ 没写入：{e}")
+            return 1
         print(f"✅ 已保存 {provider} 的 API Key：{shown}")
         print(f"   位置：{config.CONFIG_PATH}（权限 600，只本机可读）")
         return 0
