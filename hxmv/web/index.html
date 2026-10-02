@@ -199,6 +199,12 @@
   }
   @media (max-width: 420px) { #runsList { grid-template-columns: 1fr; } }
   /* 小屏顶栏别挤成两行：只留品牌名 + 紧凑分页 */
+  /* 手机上的点击目标：低于 44px 就难戳（实测 ⚙/模型/发送 只有 36-38px） */
+  @media (max-width: 900px) {
+    #gearBtn, #modelBtn, #ideaSend, #chatSend, #imgBtn, .round { min-height: 44px; }
+    #gearBtn { min-width: 44px; }
+  }
+
   @media (max-width: 560px) {
     header { gap: 8px; padding: 11px 14px; }
     header h1 { font-size: 15px; white-space: nowrap; }
@@ -616,11 +622,29 @@ async function refreshBrain() {
 }
 
 // ---------- 历史 ----------
+let RUNS_FETCHED_AT = 0;                  // 最近一次成功拉取作品列表的时间（切页去复用）
+
+/** 封面懒加载：屏幕外的视频不取 metadata（作品多时手机上省流量，进视口前 300px 就开始取） */
+function loadThumb(v) {
+  const src = v.dataset.src;
+  if (src && !v.src) { v.preload = "metadata"; v.src = src; }
+}
+function lazyThumbs() {
+  const vids = [...document.querySelectorAll("video[data-src]")];
+  if (!vids.length) return;
+  if (!("IntersectionObserver" in window)) { vids.forEach(loadThumb); return; }
+  const io = new IntersectionObserver(ents => {
+    ents.forEach(e => { if (e.isIntersecting) { loadThumb(e.target); io.unobserve(e.target); } });
+  }, { rootMargin: "300px" });
+  vids.forEach(v => io.observe(v));
+}
+
 async function refreshRuns() {
   try {
     const d = await apiGet("/api/runs");
     const box = $("runsList");
     const runs = d.runs || [];
+    RUNS_FETCHED_AT = Date.now();       // 记下这次成功拉取的时间（切页去复用）
     const we = $("worksEmpty");
     if (we) we.innerHTML = runs.length ? "" : '<button class="pill" id="goCreate"><span class="pi">✦</span>还没有作品，去创作一部</button>';
     if (we && !runs.length) { const b = $("goCreate"); if (b) b.onclick = () => showPage("create"); }
@@ -637,9 +661,9 @@ async function refreshRuns() {
       const isVid = !!r.poster && r.poster.toLowerCase().endsWith(".mp4");
       const thumb = !poster ? '<div class="ph">🎬</div>'
         : isVid
-          ? `<video src="${poster}#t=0.1" preload="metadata" muted playsinline loop
-               onmouseover="this.play()" onmouseout="this.pause();this.currentTime=0"></video>`
-          : `<img src="${poster}" alt="">`;
+          ? `<video data-src="${poster}#t=0.1" preload="none" muted playsinline loop
+               onmouseover="if(this.src)this.play()" onmouseout="this.pause();this.currentTime=0"></video>`
+          : `<img src="${poster}" alt="" loading="lazy">`;
       return `<div class="vcard" onclick="replay('${r.run_id}')">
         <div class="vthumb">${thumb}<span class="badge"><span class="dot ${st}"></span>${label}</span></div>
         <div class="vbody">
@@ -651,6 +675,7 @@ async function refreshRuns() {
           </div>
         </div></div>`;
     }).join("");
+    lazyThumbs();                        // 封面只在进入视口时才去取（手机省流量）
   } catch (e) {
     $("runsList").innerHTML = `<div class="empty" style="grid-column:1/-1">${TOKEN ? "连不上" : "未填令牌"}</div>`;
   }
@@ -911,7 +936,10 @@ function showPage(name) {
   ["create", "session", "works", "settings"].forEach(p => { const el = pageEl(p); if (el) el.hidden = (p !== name); });
   document.querySelectorAll("nav.bottom .bn").forEach(b => b.classList.toggle("on", b.dataset.page === name));
   if (name === "settings") refreshConfig();
-  if (name === "works") refreshRuns();
+  if (name === "works") {
+    // 切页就重拉整表太浪费（一次 ~17KB）：10 秒内刚拉过就不重复拉
+    if (Date.now() - RUNS_FETCHED_AT > 10000) refreshRuns();
+  }
   window.scrollTo(0, 0);
 }
 document.querySelectorAll("nav.bottom .bn").forEach(b => { b.onclick = () => showPage(b.dataset.page); });
@@ -1368,7 +1396,16 @@ $("projectInput").addEventListener("blur", refreshRef);
 refreshConn();
 refreshBrain(); refreshRuns();
 refreshRef();
-setInterval(refreshBrain, 10000);
+
+// 大脑轮询：只在「创作/会话」页 + **页面在前台**时轮询。
+// 手机切后台/锁屏时不该继续发请求（费电、费流量），回到前台立刻补一次。
+function brainPollTick() {
+  const onCreateOrSession = !$("pageCreate").hidden || !$("pageSession").hidden;
+  if (document.hidden || !onCreateOrSession) return;   // 后台 / 别的页不拉
+  refreshBrain();
+}
+setInterval(brainPollTick, 10000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) brainPollTick(); });
 </script>
 </body>
 </html>

@@ -426,6 +426,14 @@ class AgnesAdapterTest(_Isolated):
         self.assertEqual(out["asset"], "/tmp/x.png")
         self.assertEqual(seen["task"].action, "GENERATE_IMAGE")
 
+    def test_panel_works_list_lazy_loads_video_covers(self):
+        """作品列表的封面必须懒加载——手机上进作品页会把每条的 metadata 都拉一遍（实测 143KB→34KB）。"""
+        html = open("/home/admin/hxmv/hxmv/web/index.html", encoding="utf-8").read()
+        self.assertIn("data-src=", html)                 # 视频封面先不取，进视口才赋 src
+        self.assertIn("IntersectionObserver", html)
+        self.assertIn("loading=\"lazy\"", html)            # 图片封面同理
+        self.assertIn("document.hidden", html)           # 后台不轮询
+
     def test_two_providers_share_one_artifact_lock(self):
         """产物基线帧同名同路径：锁必须跨 provider 共用（各持一把等于没锁）。"""
         from hxmv.providers import base, local_render
