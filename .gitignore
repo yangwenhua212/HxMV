@@ -43,3 +43,6 @@ refs/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+
+# 本机私人词表（不进仓库）：一行一个词，tools/prepush.sh 会读它
+.private-words
