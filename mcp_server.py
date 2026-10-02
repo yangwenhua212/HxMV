@@ -4,7 +4,7 @@
 为什么走 HTTP 而不是直接 import 内核：
   HxMV 内核（RunManager / 记忆库 / 项目档案）是**单实例有状态**的（一人一实例，见 docs/DESIGN.md），
   面板进程已经持着这些状态。MCP 再开一个进程去自己跑 run，会和面板抢状态、抢产物目录。
-  所以这里只做「转发」：MCP 进程 ~30MB，形态和 eraherm-memory 的 MCP 一样。
+  所以这里只做「转发」：MCP 进程约 30MB，不 import 内核、不持有状态。
 
 工具语义（重要）：
   - hxmv_chat  ：**不落盘、不开工、不花钱**。说需求 → 回话 + 可执行 goal。

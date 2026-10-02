@@ -1,6 +1,6 @@
 """运镜（camera movement）：内核的一等能力 —— 规格 / 提示词 / 落点声明 / 首尾帧派生。
 
-为什么要单独一层（老大 2026-09 定的方向）：
+为什么要单独一层（2026-09 定的方向）：
 
 - 「会运镜」不能绑死在某一家生成服务上。智谱视频 API **没有**运镜参数（字段只有
   model/prompt/image_url/quality/with_audio/size/duration/fps），唯一杠杆是提示词；

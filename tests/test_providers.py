@@ -50,7 +50,7 @@ class _Isolated(unittest.TestCase):
 # ---------------------------------------------------------------- 注册表完整性
 class RegistryTest(unittest.TestCase):
     def test_more_than_one_api_provider(self):
-        """「可以对接多个 api 而不只是一家」是老大定的方向：这条守着它。"""
+        """「可以对接多个 api 而不只是一家」是项目方向：这条守着它。"""
         self.assertGreaterEqual(len(registry.api_specs()), 2)
 
     def test_api_specs_are_complete_and_constructible_signatures(self):
@@ -112,8 +112,8 @@ class FactoryTest(_Isolated):
 class ConfigTest(_Isolated):
     def test_key_roundtrip_and_mask(self):
         self.assertEqual(config.api_key("agnes"), "")
-        config.set_api_key("agnes", "sk-abcdefghijklmnop")
-        self.assertEqual(config.api_key("agnes"), "sk-abcdefghijklmnop")
+        config.set_api_key("agnes", "notreal-abcdefghijklmnop")
+        self.assertEqual(config.api_key("agnes"), "notreal-abcdefghijklmnop")
         self.assertNotIn("abcdefghij", config.mask(config.api_key("agnes")))   # 不回明文
         self.assertTrue(config.configured("agnes"))
 
@@ -164,7 +164,7 @@ class LlmRoutingTest(_Isolated):
         self.assertEqual(llm.active_provider(), "agnes")
 
     def test_llm_waits_out_rate_limit(self):
-        """免费档 LLM 限流（429）也要等——老大「不怕等」，不该让分镜直接退成兜底。"""
+        """免费档 LLM 限流（429）也要等（项目约定「不怕等」），不该让分镜直接退成兜底。"""
         import urllib.error
         from unittest import mock
         from hxmv.core import llm as llm_mod
@@ -273,7 +273,7 @@ class AgnesAdapterTest(_Isolated):
             p._poll_url("video_abc")
 
     def test_patient_submit_waits_out_queue_full(self):
-        """老大拍板「免费就行不怕等」：队列满/限流要退避重试，不是一撞就判死。"""
+        """项目约定「免费就行不怕等」：队列满/限流要退避重试，不是一撞就判死。"""
         from unittest import mock
         from hxmv.providers.agnes_video import AgnesVideoProvider
         from hxmv.providers.base import ProviderError

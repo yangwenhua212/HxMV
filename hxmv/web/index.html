@@ -1089,7 +1089,7 @@ async function refreshConfig() {
   } catch (e) { cfgHint("配置读取失败"); }
 }
 
-// ---------- 对话（老大要求：HxMV 也要能聊天）----------
+// ---------- 对话（需求：HxMV 也要能聊天）----------
 // 说一句话 → 它回一句话 + 给出可执行目标；点「开工」才真的跑。不点就不烧钱、不落档。
 let chatHistory = [];   // 只留在内存：刷新即清（对话不需要长期留档）
 const chatHint = (t, bad) => setHint("chatHint", t, { isErr: bad, color: "var(--dim)" });
@@ -1103,7 +1103,7 @@ function chatSay(role, text, goal) {
     b.className = "goBtn";
     b.textContent = "开工：" + goal;
     b.onclick = () => {
-      // 一次点击 = 直接开工（老大要求「一个聊天窗口就够了」，不再两步走）
+      // 一次点击 = 直接开工（需求「一个聊天窗口就够了」，不再两步走）
       $("goalInput").value = goal;
       chatSay("me", "开工：" + goal);
       chatHint("开工了，进度和成片就长在这条对话下面");

@@ -885,7 +885,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "model": llm.vision_model()}})
             return
         if u.path == "/api/chat":
-            # 对话入口（老大要求「hxmv 也需要可以聊天」）：一句话 → 回话 + 可执行目标。
+            # 对话入口（需求：HxMV 也要能聊天）：一句话 → 回话 + 可执行目标。
             # 这里**不落盘、不开工**：用户点「开工」才走 /api/run（不点就不烧钱、不落档）。
             if not self._authed():
                 self._send_err(401, "unauthorized")

@@ -1,6 +1,6 @@
 # HxSync ↔ HxMV 接入施工图（客户端契约）
 
-目标（老大的原话）：**HxSync 一边能帮忙把 HxMV 装到手机上，一边也能让它跑在远端，不管在哪跑，成品都回到 HxSync。**
+目标（需求原话）：**HxSync 一边能帮忙把 HxMV 装到手机上，一边也能让它跑在远端，不管在哪跑，成品都回到 HxSync。**
 
 HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下面的契约加一个页面即可。
 
@@ -121,10 +121,10 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 
 ## 六、发版与合规红线（别踩）
 
-- 覆盖安装：**必须 release 签名**（`hermchat-release.jks` 在老大的电脑上）+ **versionCode 递增**（现 35 → 36），
+- 覆盖安装：**必须 release 签名**（`hermchat-release.jks` 在作者本机）+ **versionCode 递增**（现 35 → 36），
   详见 `hermchat/docs/RELEASE.md`
 - 构建走 OVH（java21 现成）；本机 1.6G 只用来改代码
-- **不代老大操作任何账号**（智谱注册/实名、Termux 安装点击都必须他本人）
+- **不代用户操作任何账号**（智谱注册/实名、Termux 安装点击都必须他本人）
 
 ---
 

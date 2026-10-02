@@ -120,7 +120,7 @@ def _call_once(base: str, key: str, model: str, messages: list[dict],
         str(choice.get("finish_reason") or "")
 
 
- # 免费档限流（429）与偶发 5xx 是**上游的事**，不是我们写错了：等得起就等（老大「不怕等」）。
+ # 免费档限流（429）与偶发 5xx 是**上游的事**，不是我们写错了：等得起就等（项目约定「不怕等」）。
 # 默认最多等 120 秒，可用 HXMV_LLM_WAIT 覆盖；等的时候打印「已等/上限」，别看着像卡死。
 _CONGESTION_CODES = (429, 500, 502, 503, 504)
 

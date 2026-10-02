@@ -5,7 +5,7 @@
 
     HXMV_NOTIFY_URL=http://...  或  https://...      → POST JSON（自建 / n8n / 飞书机器人网关都行）
     HXMV_NOTIFY_URL=feishu:<webhook>                → 飞书群机器人卡片（中文可读）
-    HXMV_PUBLIC_BASE=https://hxmv.eraherm.com       → 产物下载链接用这个域名拼（不设则用请求 Host）
+    HXMV_PUBLIC_BASE=https://your-domain.example       → 产物下载链接用这个域名拼（不设则用请求 Host）
 
 推的内容是**自足的**：干了什么、成不成、几次尝试、花了多少、成片在哪（可直接下载的 URL）。
 收到就能直接播/存，不需要再回头查接口。

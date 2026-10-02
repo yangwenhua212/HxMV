@@ -239,7 +239,7 @@ def _auto_provider() -> str:
 
     为什么必须有这一步（实测踩过）：直接调 API 或 MCP 工具（不传 provider）时，
     HXMV_PROVIDER 为空 → 一律落 MockVideoExecutor → 出来的是假视频。
-    老大看到的就是「做出来的东西不对」。真视频必须优先，Mock 只能是最后的兜底。
+    用户看到的就是「做出来的东西不对」。真视频必须优先，Mock 只能是最后的兜底。
 
     多 API 版：**面板选的默认家**（config.default_provider）优先，其次按注册表顺序
     挑第一个配了 Key 的；一个都没有才退本地渲染（不花钱、不联网，但至少是真文件）。
