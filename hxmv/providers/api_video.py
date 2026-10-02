@@ -125,11 +125,12 @@ class ApiVideoProvider(VideoProvider):
     # 0 = 不等（有额度、能立刻提交的家保持原样）；免费档要排队的家在自己适配器里调大。
     # 可用 HXMV_SUBMIT_WAIT（秒）覆盖。**等的时候会把「已等/上限」打出来**——界面不能看着像卡死。
     SUBMIT_WAIT = 0.0
-    # 「扔到低峰时段跑」：NIGHT_FIRST 的家在队列满时，如果当前不在低峰窗口内，
-    # 就先park到窗口开始再重试（免费档的高峰期可能就是一直排不上）。
-    # 窗口 `HH:MM-HH:MM`（支持跨零点），空串 = 关闭；HXMV_NIGHT_WINDOW 可覆盖。
+    # 低峰时段优先（**机制保留、默认关闭**）：开着的话，队列满且当前不在低峰窗口内时，
+    # 会先 park 到窗口开始再重试。项目 2026-10 明确否掉了这个默认行为：
+    # 「不要自动凌晨，我让它做它就做」——要它自己排到夜里，得显式开（NIGHT_FIRST + HXMV_NIGHT_WINDOW）。
+    # 窗口 `HH:MM-HH:MM`，支持跨零点；空串 = 关闭。
     NIGHT_FIRST = False
-    NIGHT_WINDOW = "02:00-06:00"
+    NIGHT_WINDOW = ""
     _CONGESTION = ("429", "503", "queue", "rate limit", "too many", "try again")
     action_map = {"GENERATE_SHOT": "video", "GENERATE_CHARACTER": "image",
                   "GENERATE_SCENE": "image", "COMPOSE": "concat"}
@@ -412,13 +413,12 @@ class ApiVideoProvider(VideoProvider):
         return any(k in text for k in self._CONGESTION)
 
     def _submit_patient(self, task, prompt: str, frames: list) -> dict:
-        """提交任务；被上游按回（429/队列满）就等——**低峰时段优先，窗口内退避重试**。
+        """提交任务；被上游按回（429/队列满）就在**原地退避重试**，直到成功或窗口用尽。
 
         免费档队列常满是**上游的容量问题**，不是这一镜拍砸了——按基础设施错误处理（不退 Refiner、
-        不判 TERMINAL_FAIL）。两条策略叠着用：
-          ① `NIGHT_FIRST` 的家：不在低峰窗口内就**先park到窗口开始**（高峰期干等没意义）；
-          ② 在窗口内（或家没开低峰策略）：退避重试到 `SUBMIT_WAIT` 用尽。
-        用尽仍失败 → 照旧抛 retryable，交给闭环的熔断器。
+        不判 TERMINAL_FAIL）。默认策略是「**我让它做它就做**」：就在原地等（不自己改到别的时段）。
+        家如果显式开了 `NIGHT_FIRST`，才会在窗口外先 park 到低峰窗口再重试（默认关）。
+        窗口用尽仍失败 → 抛 retryable，交给闭环的熔断器。
         """
         wait = float(os.environ.get("HXMV_SUBMIT_WAIT") or self.SUBMIT_WAIT)
         window = os.environ.get("HXMV_NIGHT_WINDOW", self.NIGHT_WINDOW) if self.NIGHT_FIRST else ""

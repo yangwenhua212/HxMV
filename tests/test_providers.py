@@ -342,6 +342,7 @@ class AgnesAdapterTest(_Isolated):
         from hxmv.providers.base import ProviderError
         p = AgnesVideoProvider(api_key="sk-test", outdir=self._tmp)
         p.SUBMIT_WAIT = 3600.0
+        p.NIGHT_FIRST = True            # 低峰策略默认关，这里显式开，测的是机制本身
         ahead = datetime.now() + timedelta(hours=3)
         os.environ["HXMV_NIGHT_WINDOW"] = f"{ahead.strftime('%H:%M')}-23:59" \
             if ahead.hour < 23 else "02:00-06:00"
@@ -361,6 +362,15 @@ class AgnesAdapterTest(_Isolated):
         parked_for = sleepy.call_args_list[0].args[0]
         self.assertGreater(parked_for, 60)          # 是「等到窗口」那一段，不是普通退避 20s
         self.assertLessEqual(parked_for, 300)       # 分段睡，单次不超过 5 分钟
+
+    def test_default_policy_is_do_it_now(self):
+        """项目 2026-10 明确：「不要自动凌晨，我让它做它就做」——低峰策略默认必须是关的。"""
+        from hxmv.providers.agnes_video import AgnesVideoProvider
+        from hxmv.providers.api_video import ApiVideoProvider
+        self.assertFalse(AgnesVideoProvider.NIGHT_FIRST)
+        self.assertFalse(ApiVideoProvider.NIGHT_FIRST)
+        self.assertEqual(ApiVideoProvider.NIGHT_WINDOW, "")
+        self.assertEqual(AgnesVideoProvider.SUBMIT_WAIT, 7200.0)   # 「不怕等」仍保留：原地等 2 小时
 
     def test_two_providers_share_one_artifact_lock(self):
         """产物基线帧同名同路径：锁必须跨 provider 共用（各持一把等于没锁）。"""
