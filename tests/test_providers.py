@@ -239,6 +239,46 @@ class AgnesAdapterTest(_Isolated):
         with self.assertRaises(ProviderError):
             p._poll_url("video_abc")
 
+    def test_patient_submit_waits_out_queue_full(self):
+        """老大拍板「免费就行不怕等」：队列满/限流要退避重试，不是一撞就判死。"""
+        from unittest import mock
+        from hxmv.providers.agnes_video import AgnesVideoProvider
+        from hxmv.providers.base import ProviderError
+        p = AgnesVideoProvider(api_key="sk-test", outdir=self._tmp)
+        p.SUBMIT_WAIT = 60.0
+        calls = {"n": 0}
+
+        def flaky(task, prompt, frames):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ProviderError('提交任务失败 HTTP 503: {"code":"video_queue_full"}', retryable=True)
+            return {"video_id": "video_ok"}
+
+        p._submit = flaky
+        with mock.patch("hxmv.providers.api_video.time.sleep") as sleepy:
+            out = p._submit_patient(None, "p", [])
+        self.assertEqual(out["video_id"], "video_ok")
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(sleepy.call_count, 2)          # 等了两次，第三次成了
+
+    def test_patient_submit_does_not_swallow_real_errors(self):
+        """参数错/鉴权错不该被当成「排队」耗着等——那会让真正的 bug 看不见。"""
+        from hxmv.providers.agnes_video import AgnesVideoProvider
+        from hxmv.providers.base import ProviderError
+        p = AgnesVideoProvider(api_key="sk-test", outdir=self._tmp)
+        p.SUBMIT_WAIT = 60.0
+        p._submit = lambda *a: (_ for _ in ()).throw(
+            ProviderError("提交任务失败 HTTP 400: mode is required", retryable=False))
+        self.assertFalse(p._congested(ProviderError("400 mode is required")))
+        with self.assertRaises(ProviderError):
+            p._submit_patient(None, "p", [])
+
+    def test_free_tier_provider_is_patient_by_default(self):
+        """Agnes 免费档的默认耐心值必须 >0（不然「不怕等」这条等于没实现）。"""
+        from hxmv.providers.agnes_video import AgnesVideoProvider
+        self.assertGreater(AgnesVideoProvider.SUBMIT_WAIT, 0)
+        self.assertGreater(AgnesVideoProvider.DEFAULT_TIMEOUT, 420)
+
     def test_two_providers_share_one_artifact_lock(self):
         """产物基线帧同名同路径：锁必须跨 provider 共用（各持一把等于没锁）。"""
         from hxmv.providers import base, local_render

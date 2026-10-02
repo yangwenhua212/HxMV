@@ -92,6 +92,11 @@ class ApiVideoProvider(VideoProvider):
     COST_UNITS: dict = {}            # 档位 → 元/次（免费档填 0）
     MAX_DURATION: dict = {}          # 档位 → 单镜头时长上限（秒）；执行器据此钳制"要多久"
     DEFAULT_TIMEOUT = 420.0          # 单任务轮询上限（秒）；排队久的家在自己的适配器里调大
+    # 「不怕等」：提交被上游按回（429/队列满 503）时，最多再等这么久重试，而不是直接判失败。
+    # 0 = 不等（有额度、能立刻提交的家保持原样）；免费档要排队的家在自己适配器里调大。
+    # 可用 HXMV_SUBMIT_WAIT（秒）覆盖。**等的时候会把「已等/上限」打出来**——界面不能看着像卡死。
+    SUBMIT_WAIT = 0.0
+    _CONGESTION = ("429", "503", "queue", "rate limit", "too many", "try again")
     action_map = {"GENERATE_SHOT": "video", "GENERATE_CHARACTER": "image",
                   "GENERATE_SCENE": "image", "COMPOSE": "concat"}
 
@@ -367,9 +372,35 @@ class ApiVideoProvider(VideoProvider):
     def _submit(self, task, prompt: str, frames: list) -> dict:
         return self._post(self.video_path, self._submit_body(task, prompt, frames))
 
+    def _congested(self, err: Exception) -> bool:
+        """上游「排队/限流」而不是「我们请求写错了」——这类值得等，参数错不值得等。"""
+        text = str(err).lower()
+        return any(k in text for k in self._CONGESTION)
+
+    def _submit_patient(self, task, prompt: str, frames: list) -> dict:
+        """提交任务；被上游按回（429/队列满）就在窗口内退避重试，直到成功或窗口用尽。
+
+        免费档队列常满是**上游的容量问题**，不是这一镜拍砸了——按基础设施错误处理（不退 Refiner、
+        不判 TERMINAL_FAIL），等得起就等。窗口用尽仍失败 → 照旧抛 retryable，交给闭环的熔断器。
+        """
+        wait = float(os.environ.get("HXMV_SUBMIT_WAIT") or self.SUBMIT_WAIT)
+        deadline = time.time() + wait
+        delay = 20.0
+        while True:
+            try:
+                return self._submit(task, prompt, frames)
+            except ProviderError as e:
+                if not (e.retryable and self._congested(e)) or time.time() >= deadline:
+                    raise
+                left = max(0.0, deadline - time.time())
+                print(f"⏳ 上游排队/限流：{delay:.0f}s 后再试（已等 "
+                      f"{(time.time() - (deadline - wait)) / 60:.1f} 分 / 上限 {wait / 60:.0f} 分）")
+                time.sleep(min(delay, left + 1))
+                delay = min(delay * 1.6, 180.0)
+
     def _finish(self, task, prompt: str, frames: list) -> tuple[str, str]:
         """提交 + 轮询 → (task_id, 视频地址)。"""
-        submitted = self._submit(task, prompt, frames)
+        submitted = self._submit_patient(task, prompt, frames)
         task_id = submitted.get("id") or submitted.get("task_id") or submitted.get("request_id")
         if not task_id:
             raise ProviderError(f"提交未返回任务 id: {json.dumps(submitted, ensure_ascii=False)[:200]}",
