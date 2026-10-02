@@ -163,6 +163,39 @@ class LlmRoutingTest(_Isolated):
         os.environ["HXMV_PROVIDER"] = "local"
         self.assertEqual(llm.active_provider(), "agnes")
 
+    def test_llm_waits_out_rate_limit(self):
+        """免费档 LLM 限流（429）也要等——老大「不怕等」，不该让分镜直接退成兜底。"""
+        import urllib.error
+        from unittest import mock
+        from hxmv.core import llm as llm_mod
+        config.set_api_key("agnes", "sk-test")
+        calls = {"n": 0}
+
+        def flaky(base, key, model, messages, temperature, max_tokens):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
+            return "好了", "stop"
+
+        with mock.patch("hxmv.core.llm._call_once", side_effect=flaky), \
+             mock.patch("hxmv.core.llm.time.sleep") as sleepy:
+            out = llm_mod.chat([{"role": "user", "content": "x"}])
+        self.assertEqual((out, calls["n"]), ("好了", 3))
+        self.assertEqual(sleepy.call_count, 2)
+
+    def test_llm_does_not_wait_on_parameter_errors(self):
+        """参数错（400）等着等于把 bug 藏起来：立刻抛，交调用方降级。"""
+        import urllib.error
+        from unittest import mock
+        from hxmv.core import llm as llm_mod
+        config.set_api_key("agnes", "sk-test")
+        with mock.patch("hxmv.core.llm._call_once",
+                        side_effect=urllib.error.HTTPError("u", 400, "Bad Request", {}, None)), \
+             mock.patch("hxmv.core.llm.time.sleep") as sleepy:
+            with self.assertRaises(urllib.error.HTTPError):
+                llm_mod.chat([{"role": "user", "content": "x"}])
+        self.assertEqual(sleepy.call_count, 0)
+
     def test_explicit_openai_endpoint_has_no_default_vision(self):
         os.environ["OPENAI_API_KEY"] = "sk-custom"
         os.environ["OPENAI_BASE_URL"] = "https://example.com/v1"

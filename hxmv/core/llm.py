@@ -19,6 +19,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
+import urllib.error
 import urllib.request
 
 from .. import USER_AGENT
@@ -118,6 +120,29 @@ def _call_once(base: str, key: str, model: str, messages: list[dict],
         str(choice.get("finish_reason") or "")
 
 
+ # 免费档限流（429）与偶发 5xx 是**上游的事**，不是我们写错了：等得起就等（老大「不怕等」）。
+# 默认最多等 120 秒，可用 HXMV_LLM_WAIT 覆盖；等的时候打印「已等/上限」，别看着像卡死。
+_CONGESTION_CODES = (429, 500, 502, 503, 504)
+
+
+def _call_patient(base: str, key: str, model: str, messages: list[dict],
+                  temperature: float, max_tokens: int) -> tuple[str, str]:
+    wait = float(os.environ.get("HXMV_LLM_WAIT", "120") or 0)
+    deadline = time.time() + wait
+    delay = 5.0
+    while True:
+        try:
+            return _call_once(base, key, model, messages, temperature, max_tokens)
+        except urllib.error.HTTPError as e:
+            if e.code not in _CONGESTION_CODES or time.time() >= deadline:
+                raise
+            left = max(0.0, deadline - time.time())
+            print(f"⏳ 模型端限流/不可用（HTTP {e.code}）：{delay:.0f}s 后再试"
+                  f"（上限 {wait:.0f}s，剩 {left:.0f}s）")
+            time.sleep(min(delay, left + 1))
+            delay = min(delay * 2, 60.0)
+
+
 def chat(messages: list[dict], temperature: float = 0.3, max_tokens: int = 1024,
          model: str | None = None) -> str:
     """调 chat completion，返回文本。失败抛异常（调用方自行降级）。"""
@@ -125,11 +150,11 @@ def chat(messages: list[dict], temperature: float = 0.3, max_tokens: int = 1024,
     if not key:
         raise RuntimeError("没有可用的 LLM Key（既没 OPENAI_API_KEY，也没配任何一家的 Key）")
     model = model or os.environ.get("HXMV_LLM_MODEL") or text_model() or "gpt-4o-mini"
-    text, finish = _call_once(base, key, model, messages, temperature, max_tokens)
+    text, finish = _call_patient(base, key, model, messages, temperature, max_tokens)
     if not text and finish == "length":
         # 思维链型模型（实测 agnes-2.5-flash）会把预算全花在推理上、正文返回空字符串。
         # 放大预算再问一次（不做无界重试：仍空就交给调用方降级，别装作拿到了答案）。
-        text, _ = _call_once(base, key, model, messages, temperature, max(max_tokens * 4, 2048))
+        text, _ = _call_patient(base, key, model, messages, temperature, max(max_tokens * 4, 2048))
     return text
 
 
