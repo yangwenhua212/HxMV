@@ -38,6 +38,8 @@ class AgnesVideoProvider(ApiVideoProvider):
     COST_UNITS = {"agnes-video-2.5-flash": 0.0, "agnes-video-2.5": 0.9}
     # 官方允许 4–12 秒（字符串）；按能力如实声明，执行器据此钳制"要多久"
     MAX_DURATION = {"agnes-video-2.5-flash": 12.0, "agnes-video-2.5": 12.0}
+    # 免费档排队实测要 10 分钟上下才出片（旧默认 420s 会在排队中就被判超时、白重投一次）
+    DEFAULT_TIMEOUT = 900.0
 
     def _image_body(self, prompt: str, ratio: str) -> dict:
         # size 是**档位**不是像素；不给 ratio 会按 1:1 出图

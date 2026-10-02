@@ -91,6 +91,7 @@ class ApiVideoProvider(VideoProvider):
     FIRST_LAST_MODELS: set = set()   # 哪些档位支持首尾帧（可把运镜方向钉死）
     COST_UNITS: dict = {}            # 档位 → 元/次（免费档填 0）
     MAX_DURATION: dict = {}          # 档位 → 单镜头时长上限（秒）；执行器据此钳制"要多久"
+    DEFAULT_TIMEOUT = 420.0          # 单任务轮询上限（秒）；排队久的家在自己的适配器里调大
     action_map = {"GENERATE_SHOT": "video", "GENERATE_CHARACTER": "image",
                   "GENERATE_SCENE": "image", "COMPOSE": "concat"}
 
@@ -111,7 +112,7 @@ class ApiVideoProvider(VideoProvider):
         self.camera_support = {camera.CAP_PROMPT}
         if self.model in self.FIRST_LAST_MODELS:
             self.camera_support.add(camera.CAP_FIRST_LAST)
-        self.timeout = float(os.environ.get("HXMV_API_TIMEOUT", "420"))
+        self.timeout = float(os.environ.get("HXMV_API_TIMEOUT") or self.DEFAULT_TIMEOUT)
         self.outdir = outdir or os.environ.get("HXMV_ARTIFACTS") or (
             os.path.join(project.dir, "artifacts") if project else
             os.path.expanduser(f"~/.hxmv/artifacts/{time.strftime('%Y%m%d-%H%M%S')}"))
