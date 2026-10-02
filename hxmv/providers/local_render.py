@@ -114,7 +114,7 @@ class LocalRenderProvider(VideoProvider):
     camera_support = {camera.CAP_RENDER}
     # 产物按 task_id 命名互不冲突；共用路径（参考图/基线帧/漂移图）由 _FILE_LOCK 串行化
     parallel_safe = True
-    action_map = {"GENERATE_SHOT": "render", "GENERATE_SCENE": "render",
+    action_map = {"GENERATE_SHOT": "render", "GENERATE_SCENE": "render", "GENERATE_IMAGE": "render",
                   "GENERATE_CHARACTER": "render", "COMPOSE": "concat"}
 
     def __init__(self, outdir: str | None = None, project: Project | None = None):

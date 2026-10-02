@@ -328,6 +328,7 @@
         <button class="pill" data-act="focus"><span class="pi">▶</span>输入灵感，智能生视频</button>
         <button class="pill" data-act="img2video"><span class="pi">🖼</span>照片跟我动（图生视频）<span class="tag new">新</span></button>
         <button class="pill" data-act="multi"><span class="pi">🎞</span>一镜到底 · 多镜头成片</button>
+        <button class="pill" data-act="image"><span class="pi">🎨</span>只出一张图 · 单张图片<span class="tag">免费</span></button>
         <button class="pill" data-act="character"><span class="pi">👤</span>角色一致性（参考图）</button>
         <button class="pill" data-act="project"><span class="pi">📁</span>续做同一部（项目）</button>
       </div>
@@ -395,6 +396,10 @@
         <div class="row">
           <input id="chatInput" placeholder="说一句：想做什么片 / 想改哪里（如「刚才那条改成夜晚，5 秒」）">
           <button id="chatSend">发送</button>
+        </div>
+        <div class="row">
+          <input id="imgPrompt" placeholder="只想要一张图：描述画面（如「一只柯基戴着红围巾坐在雪地里」）">
+          <button id="imgBtn" class="chip2">出一张图</button>
         </div>
         <div id="runHint"></div>
         <textarea id="goalInput" hidden></textarea>
@@ -977,6 +982,8 @@ const PILL_ACTS = {
   focus: () => $("ideaInput").focus(),
   img2video: openRef,
   multi: () => { $("ideaInput").value = "一个小猴子在花果山翻跟头，多镜头一镜到底，5 秒"; $("ideaInput").focus(); },
+  image: () => { showPage("session"); $("imgPrompt").focus();
+                 chatHint("说出画面，点「出一张图」——不进闭环、不编剧、不拍视频，出图免费"); },
   character: openRef,
   project: () => { showPage("session"); $("projectInput").focus(); chatHint("续做同一部：先填项目名，它就会接着上一部做"); },
 };
@@ -1128,6 +1135,53 @@ async function chatSend() {
   } catch (e) { chatHint(e.message, true); }
 }
 $("chatSend").onclick = chatSend;
+
+/** 把一张图贴进对话流（「只出一张图」的结果就长在这里） */
+function chatImage(url, caption) {
+  $("chatEmpty").hidden = true;
+  const el = document.createElement("div");
+  el.className = "chatMsg ai";
+  const img = document.createElement("img");
+  img.src = withToken(url);
+  img.style.maxWidth = "min(100%, 420px)";
+  img.style.borderRadius = "12px";
+  img.style.display = "block";
+  el.appendChild(img);
+  if (caption) {
+    const p = document.createElement("div");
+    p.textContent = caption;
+    p.style.marginTop = "6px";
+    p.style.opacity = "0.8";
+    el.appendChild(p);
+  }
+  const log = $("chatLog");
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+/** 只出一张图：不进闭环、不编剧、不拍视频——描述什么就画什么（免费档几秒到十几秒） */
+$("imgBtn").onclick = async () => {
+  const prompt = $("imgPrompt").value.trim();
+  if (!prompt) { chatHint("先写一句画面描述"); return; }
+  chatSay("me", "出一张图：" + prompt);
+  chatHint("出图中…");
+  $("imgBtn").disabled = true;
+  try {
+    const d = await postJson("/api/image", { prompt });
+    if (d.ok) {
+      chatImage(d.url, `✅ ${d.label || d.provider} · ${d.model || ""}`);
+      chatHint("出好了（图在上面，点开可以存）");
+      $("imgPrompt").value = "";
+    } else {
+      chatHint("出图失败：" + (d.error || "未知原因"));
+    }
+  } catch (e) {
+    chatHint("出图失败：" + (e && e.message ? e.message : e));
+  } finally {
+    $("imgBtn").disabled = false;
+  }
+};
+$("imgPrompt").addEventListener("keydown", e => { if (e.key === "Enter") $("imgBtn").click(); });
 document.querySelectorAll("#chatEmpty .chip2").forEach(b => {
   b.onclick = () => { $("chatInput").value = b.dataset.ask; chatSend(); };
 });

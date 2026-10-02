@@ -343,9 +343,10 @@ class AgnesAdapterTest(_Isolated):
         p = AgnesVideoProvider(api_key="sk-test-abcdefghijklmnop", outdir=self._tmp)
         p.SUBMIT_WAIT = 3600.0
         p.NIGHT_FIRST = True            # 低峰策略默认关，这里显式开，测的是机制本身
-        ahead = datetime.now() + timedelta(hours=3)
-        os.environ["HXMV_NIGHT_WINDOW"] = f"{ahead.strftime('%H:%M')}-23:59" \
-            if ahead.hour < 23 else "02:00-06:00"
+        # 窗口设成「3 小时后开始、5 小时后结束」——保证此刻在窗口外（跨零点也算得对）
+        start = datetime.now() + timedelta(hours=3)
+        end = datetime.now() + timedelta(hours=5)
+        os.environ["HXMV_NIGHT_WINDOW"] = f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
         calls = {"n": 0}
 
         def flaky(task, prompt, frames):
@@ -396,6 +397,34 @@ class AgnesAdapterTest(_Isolated):
         dup = checks["Key 查重（不同家不能共用同一把）"]
         self.assertFalse(dup["ok"])
         self.assertIn("同一把", dup["detail"])
+
+    def test_free_image_prompt_goes_verbatim(self):
+        """「只出一张图」= 用户原话就是画面描述：不套设定表/场景模板、不交给 LLM 改写。"""
+        from hxmv.core.state import Task
+        from hxmv.providers.agnes_video import AgnesVideoProvider
+        p = AgnesVideoProvider(api_key="sk-test-abcdefghijklmnop", outdir=self._tmp)
+        task = Task(task_id="t1", action="GENERATE_IMAGE",
+                    input={"prompt": "一只柯基戴着红围巾坐在雪地里"}, constraints={})
+        prompt = p._asset_prompt(task, "image")
+        self.assertIn("一只柯基戴着红围巾坐在雪地里", prompt)
+        self.assertNotIn("character design sheet", prompt)     # 不能套设定表模板
+        self.assertNotIn("cinematic wide keyframe", prompt)     # 也不能套场景定帧模板
+
+    def test_generate_routes_free_image_to_asset_not_video(self):
+        """自由出图必须走出图分支——踩过：没加进分发就落进视频分支，去排视频队列（等 2 小时）。"""
+        from hxmv.core.state import Task
+        from hxmv.providers.agnes_video import AgnesVideoProvider
+        p = AgnesVideoProvider(api_key="sk-test-abcdefghijklmnop", outdir=self._tmp)
+        seen = {}
+
+        def fake_asset(task):
+            seen["task"] = task
+            return {"asset": "/tmp/x.png"}
+
+        p._generate_asset = fake_asset
+        out = p.generate(Task(task_id="t2", action="GENERATE_IMAGE", input={"prompt": "猫"}, constraints={}))
+        self.assertEqual(out["asset"], "/tmp/x.png")
+        self.assertEqual(seen["task"].action, "GENERATE_IMAGE")
 
     def test_two_providers_share_one_artifact_lock(self):
         """产物基线帧同名同路径：锁必须跨 provider 共用（各持一把等于没锁）。"""

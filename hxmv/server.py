@@ -51,6 +51,7 @@ from .core.loop import run
 from .providers import registry
 
 RUNS_DIR = os.path.expanduser("~/.hxmv/runs")
+IMAGES_DIR = os.path.expanduser("~/.hxmv/images")     # 「只出一张图」的落盘处（与 run 产物分开）
 DL_DIR = os.environ.get("HXMV_DL_DIR", os.path.expanduser("~/.hxmv/dl"))
 HOOKS_DIR = os.environ.get("HXMV_HOOKS_DIR", os.path.expanduser("~/.hxmv/hooks"))
 STARTED_AT = time.time()
@@ -510,6 +511,33 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_err(500, f"面板文件缺失: {WEB_HTML}")
             return
 
+        if p == "/api/image/file":
+            # 取回「只出一张图」出的图（文件名白名单校验，防穿越）
+            if not self._authed():
+                self._send_err(401, "unauthorized")
+                return
+            name = (parse_qs(u.query).get("name") or [""])[0]
+            if not name or "/" in name or "\\" in name or name.startswith("."):
+                self._send_err(400, "name 不合法")
+                return
+            path = os.path.join(IMAGES_DIR, name)
+            if not os.path.isfile(path):
+                self._send_err(404, f"图不存在: {name}")
+                return
+            try:
+                with open(path, "rb") as f:
+                    body = f.read()
+            except OSError as e:
+                self._send_err(500, f"读图失败: {e}")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if p == "/api/config":
             # 接口配置（面板设置页用）：只回**脱敏**状态，明文 Key 永不回传。
             # 有哪几家、每家有哪些档位 = 注册表说了算（加一家 API 不用改这里）。
@@ -888,6 +916,49 @@ class Handler(BaseHTTPRequestHandler):
                              "vision": {"ready": llm.vision_available(),
                                         "model": llm.vision_model()}})
             return
+        if u.path == "/api/image":
+            # **只出一张图**（不进闭环、不编剧、不拍视频）：用户描述 → 出图模型 → 落盘 → 回地址。
+            # 为什么要有它：闭环里出图是"给片子用的"（设定表/场景定帧），想单独画一张图以前没入口。
+            if not self._authed():
+                self._send_err(401, "unauthorized")
+                return
+            from .core import config                     # noqa: F401（保持与其它分支一致的依赖位置）
+            from .core.executor import _auto_provider
+            from .core.state import Task
+            body = self._read_body()
+            prompt = str(body.get("prompt", "")).strip()
+            if not prompt:
+                self._send_err(400, "prompt 不能为空")
+                return
+            if len(prompt) > 2000:
+                self._send_err(400, "prompt 太长（2000 字以内）")
+                return
+            spec = registry.get(_auto_provider())
+            if not (spec and spec.api):
+                self._send_err(400, f"现在没有能出图的家（挑了 {spec.id if spec else '无'}）：先在设置页配 Key")
+                return
+            os.makedirs(IMAGES_DIR, exist_ok=True)
+            try:
+                provider_obj = spec.create(outdir=IMAGES_DIR)
+                r = provider_obj.generate(Task(
+                    task_id="image-" + time.strftime("%H%M%S") + "-" + uuid.uuid4().hex[:4],
+                    action="GENERATE_IMAGE", input={"prompt": prompt},
+                    constraints={"ratio": str(body.get("ratio") or "")}))
+            except Exception as e:                        # noqa: BLE001 —— 面板要给一句人话
+                self._send_err(500, f"出图失败：{type(e).__name__}: {str(e)[:200]}")
+                return
+            if r.get("image_failed"):
+                self._send_err(502, "出图 API 没成功（免费档限流？稍等一下再试）")
+                return
+            name = os.path.basename(str(r.get("asset") or ""))
+            if not name:
+                self._send_err(500, "出图没有落盘")
+                return
+            self._send_json({"ok": True, "provider": spec.id, "label": spec.label,
+                             "model": r.get("image_model") or "", "name": name,
+                             "url": "/api/image/file?name=" + quote(name)})
+            return
+
         if u.path == "/api/chat":
             # 对话入口（需求：HxMV 也要能聊天）：一句话 → 回话 + 可执行目标。
             # 这里**不落盘、不开工**：用户点「开工」才走 /api/run（不点就不烧钱、不落档）。

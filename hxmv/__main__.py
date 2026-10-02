@@ -77,6 +77,10 @@ def main() -> int:
     ap.add_argument("--default", default=None, metavar="PROVIDER",
                     help="选「默认用哪家」（面板里选的同一项）；不指定 provider 时按它生成")
     ap.add_argument("--key-status", action="store_true", help="查看各 provider 的 Key 是否已配置")
+    ap.add_argument("--image", default=None, metavar="描述",
+                    help="**只出一张图**（不进闭环）：用默认家出图，打印落盘路径。例：--image \"一只柯基在雪地里\"")
+    ap.add_argument("--ratio", default="", metavar="1:1|16:9|9:16",
+                    help="配合 --image：画幅比例（默认 1:1）")
     ap.add_argument("--doctor", action="store_true",
                     help="部署自检：Python/ffmpeg/编码器/Key/目录/端口，缺什么给什么修复命令")
     ap.add_argument("--out", default=None, help="产物目录（local provider 用，默认 ~/.hxmv/artifacts/<时间戳>）")
@@ -145,6 +149,36 @@ def main() -> int:
         hard = [c for c in checks if not c["ok"] and c["name"] in
                 ("Python", "ffmpeg/ffprobe", "数据目录可写")]
         return 1 if hard else 0
+
+    if args.image:
+        # 只出一张图：不进闭环、不编剧、不拍视频——用户原话直接交给出图模型
+        import time as _time
+        from .core import config
+        from .core.executor import _auto_provider
+        from .core.state import Task
+        pid = _auto_provider()
+        spec = registry.get(pid)
+        if not spec or not spec.api:
+            print(f"⚠ 现在没有能出图的家（挑了 {pid}）：先配一家的 Key")
+            return 1
+        outdir = args.out or os.path.join(os.path.expanduser("~/.hxmv/images"),
+                                          _time.strftime("%Y%m%d-%H%M%S"))
+        provider_obj = spec.create(outdir=outdir)
+        task = Task(task_id="image-" + _time.strftime("%H%M%S"), action="GENERATE_IMAGE",
+                    input={"prompt": args.image}, constraints={"ratio": args.ratio})
+        print(f"🎨 出图（{spec.label}）…")
+        try:
+            r = provider_obj.generate(task)
+        except Exception as e:                       # noqa: BLE001 —— CLI 要给一句人话，不是堆栈
+            print(f"⚠ 出图失败：{type(e).__name__}: {str(e)[:200]}")
+            return 1
+        path = r.get("asset") or ""
+        if r.get("image_failed"):
+            print(f"⚠ 出图 API 没成功，这里只是本地兜底图：{path}")
+            return 1
+        print(f"✅ 已出图：{path}")
+        print(f"   出图模型：{r.get('image_model') or '（本地兜底）'}")
+        return 0
 
     if args.list_projects:
         from .core.project import Project, PROJECTS_DIR

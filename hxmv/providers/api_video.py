@@ -131,9 +131,12 @@ class ApiVideoProvider(VideoProvider):
     # 窗口 `HH:MM-HH:MM`，支持跨零点；空串 = 关闭。
     NIGHT_FIRST = False
     NIGHT_WINDOW = ""
+    # 出图（交互式）被限流时最多等多久；视频排队走 SUBMIT_WAIT（可以很长）
+    IMAGE_WAIT = 90.0
     _CONGESTION = ("429", "503", "queue", "rate limit", "too many", "try again")
     action_map = {"GENERATE_SHOT": "video", "GENERATE_CHARACTER": "image",
-                  "GENERATE_SCENE": "image", "COMPOSE": "concat"}
+                  "GENERATE_SCENE": "image", "GENERATE_IMAGE": "image",   # 自由出图（一张图，不进闭环）
+                  "COMPOSE": "concat"}
 
     # ---------- 构造 ----------
     def __init__(self, project=None, outdir: str | None = None, api_key: str | None = None):
@@ -171,6 +174,26 @@ class ApiVideoProvider(VideoProvider):
             headers["Content-Type"] = "application/json;charset=utf-8"
         return urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
                                       headers=headers, method="POST" if body is not None else "GET")
+
+    def _post_patient(self, path: str, body: dict) -> dict:
+        """出图请求：被限流（429/队列满）时**短**耐心重试。
+
+        为什么跟视频分开：视频排队能等很久（用户接受"等"），出图是**交互式**操作
+        （点一下要一张图），默认最多等 `IMAGE_WAIT`（可用 HXMV_IMAGE_WAIT 覆盖）。
+        """
+        wait = float(os.environ.get("HXMV_IMAGE_WAIT") or self.IMAGE_WAIT)
+        deadline = time.time() + wait
+        delay = 5.0
+        while True:
+            try:
+                return self._post(path, body)
+            except ProviderError as e:
+                if not (e.retryable and self._congested(e)) or time.time() >= deadline:
+                    raise
+                left = max(0.0, deadline - time.time())
+                print(f"⏳ 出图被限流：{delay:.0f}s 后再试（上限 {wait:.0f}s，剩 {left:.0f}s）")
+                time.sleep(min(delay, left + 1))
+                delay = min(delay * 2, 30.0)
 
     def _post(self, path: str, body: dict) -> dict:
         return self._send(self._request(f"{self.base}/{path}", body), "提交任务")
@@ -231,7 +254,7 @@ class ApiVideoProvider(VideoProvider):
         return ((resp.get("data") or [{}])[0] or {}).get("url") or None
 
     def _image_gen(self, prompt: str, ratio: str) -> str:
-        resp = self._post(self.image_path, self._image_body(prompt, ratio))
+        resp = self._post_patient(self.image_path, self._image_body(prompt, ratio))
         url = self._image_url(resp)
         if not url:
             raise ProviderError(f"出图未返回地址: {json.dumps(resp, ensure_ascii=False)[:160]}",
@@ -276,7 +299,11 @@ class ApiVideoProvider(VideoProvider):
         单张图锁不住设计（换个角度就变样）。设定表是**设计基准**，
         所以它不当首帧用（网格画面喂给视频模型，片子里就会真的出现格子）。
         """
-        desc = desc if desc is not None else self._describe(str(task.input.get("prompt") or "").strip(), kind)
+        raw = str(task.input.get("prompt") or "").strip()
+        # 自由出图：**用户的原话就是画面描述**——不改写、不套模板、不加戏
+        if kind == "image":
+            return (desc if desc is not None else raw) + ", high detail, no text, no watermark."
+        desc = desc if desc is not None else self._describe(raw, kind)
         style = str(task.constraints.get("style") or "cinematic, film-like color").strip()
         if kind == "character":
             return (
@@ -297,13 +324,14 @@ class ApiVideoProvider(VideoProvider):
 
     def _generate_asset(self, task) -> dict:
         """用出图模型出资产图（角色设定表 / 场景定帧）。出图失败退回本地资产，但把原因标出来。"""
-        kind = "character" if task.action == "GENERATE_CHARACTER" else "scene"
+        kind = {"GENERATE_CHARACTER": "character", "GENERATE_SCENE": "scene"}.get(task.action, "image")
         key = str(task.constraints.get("asset_key") or task.constraints.get("scene_key") or task.task_id)
-        desc = self._describe(str(task.input.get("prompt") or "").strip(), kind)
+        raw = str(task.input.get("prompt") or "").strip()
+        desc = raw if kind == "image" else self._describe(raw, kind)
         prompt = self._asset_prompt(task, kind, desc)
         # 档案里已有**用户自己传的**参考图（非占位色卡、非系统设定表）→ 直接复用，绝不覆盖。
         # 实测踩过：系统自己又生成一张，把用户登记的那张顶掉了 —— 出的片子自然和用户给的无关。
-        if self.project:
+        if self.project and kind != "image":      # 自由出图不进档案复用（它不是某个角色/场景的设定）
             have = self.project.asset(kind, key)
             if have and not have.get("placeholder") and not have.get("sheet"):
                 return {"asset": have["path"], "asset_key": key, "kind": kind,
@@ -319,7 +347,9 @@ class ApiVideoProvider(VideoProvider):
 
         resp = None
         try:
-            resp = self._post(self.image_path, self._image_body(prompt, "1:1" if kind == "character" else "16:9"))
+            ratio = str(task.constraints.get("ratio") or "").strip() or \
+                ("1:1" if kind == "character" else "16:9" if kind == "scene" else "1:1")
+            resp = self._post_patient(self.image_path, self._image_body(prompt, ratio))
         except ProviderError as e:
             print(f"⚠ 出图失败（{e}）→ 退回本地资产")
         url = self._image_url(resp) if resp else None
@@ -491,8 +521,8 @@ class ApiVideoProvider(VideoProvider):
     def generate(self, task) -> dict:
         # 角色设定表 / 场景定帧：**真 AI 出图**（原来一律甩给本地 FFmpeg 出占位色卡，
         # 色卡又不能当首帧 → 角色一致性从头到尾没有抓手）。
-        if task.action in ("GENERATE_CHARACTER", "GENERATE_SCENE"):
-            return self._generate_asset(task)
+        if task.action in ("GENERATE_CHARACTER", "GENERATE_SCENE", "GENERATE_IMAGE"):
+            return self._generate_asset(task)      # 出图类：设定表/场景定帧/自由出图
         if task.action in ("STORYBOARD", "COMPOSE"):
             return self._local.generate(task)      # 分镜/成片：复用本地实现
 
