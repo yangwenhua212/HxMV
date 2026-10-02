@@ -274,6 +274,19 @@
   .backBtn { background: transparent; border: 1px solid var(--border); color: var(--dim);
              border-radius: 999px; padding: 6px 14px; font-size: 13px; margin-bottom: 10px; }
   .sec-title { font-size: 18px; font-weight: 700; }
+
+  /* 作品页分段：作品 / 图片 */
+  .segbar { display: flex; gap: 8px; margin: 0 0 12px; }
+  .seg { flex: 1; min-height: 40px; border-radius: 12px; border: 1px solid var(--border);
+         background: transparent; color: var(--dim); font-size: 14px; cursor: pointer; }
+  .seg.on { background: var(--panel2); color: var(--text); border-color: var(--accent); }
+  /* 图片网格：出的图一屏能扫完 */
+  #imgList { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .imgCard { border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+             background: var(--panel2); cursor: pointer; }
+  .imgCard img { width: 100%; display: block; aspect-ratio: 1 / 1; object-fit: cover; background: #06100d; }
+  .imgCard .meta { display: flex; justify-content: space-between; gap: 6px;
+                   font-size: 12px; color: var(--dim); padding: 6px 8px; }
   /* 空对话不留空框 */
   #chatLog:empty { display: none; }
   /* 通用语义色：替代 JS 里二十多处内联 style="color:..."（内联没法统一换主题） */
@@ -337,6 +350,7 @@
         <button class="pill" data-act="img2video"><span class="pi">🖼</span>照片跟我动（图生视频）<span class="tag new">新</span></button>
         <button class="pill" data-act="multi"><span class="pi">🎞</span>一镜到底 · 多镜头成片</button>
         <button class="pill" data-act="image"><span class="pi">🎨</span>只出一张图 · 单张图片<span class="tag">免费</span></button>
+        <button class="pill" data-act="myimages"><span class="pi">🖼</span>我出的图 · 历史都在这里</button>
         <button class="pill" data-act="character"><span class="pi">👤</span>角色一致性（参考图）</button>
         <button class="pill" data-act="project"><span class="pi">📁</span>续做同一部（项目）</button>
       </div>
@@ -359,9 +373,18 @@
 
   <div class="page" id="pageWorks" hidden>
     <section class="home">
-      <div class="sec-title">作品</div>
-      <div id="runsList"></div>
-      <div id="worksEmpty"></div>
+      <div class="segbar">
+        <button class="seg on" id="segRuns">作品</button>
+        <button class="seg" id="segImages">图片</button>
+      </div>
+      <div id="runsPane">
+        <div id="runsList"></div>
+        <div id="worksEmpty"></div>
+      </div>
+      <div id="imagesPane" hidden>
+        <div id="imgList"></div>
+        <div id="imgEmpty"></div>
+      </div>
     </section>
   </div>
 
@@ -639,6 +662,41 @@ function lazyThumbs() {
     ents.forEach(e => { if (e.isIntersecting) { loadThumb(e.target); io.unobserve(e.target); } });
   }, { rootMargin: "300px" });
   vids.forEach(v => io.observe(v));
+}
+
+/** 「只出一张图」的历史：退出去再回来也能找回来（以前只在对话流里，刷新就没了） */
+async function refreshImages() {
+  const box = $("imgList"), empty = $("imgEmpty");
+  if (!box) return;
+  try {
+    const d = await apiGet("/api/images");
+    const imgs = d.images || [];
+    if (!imgs.length) {
+      box.innerHTML = "";
+      if (empty) empty.innerHTML = '<div class="empty">还没有出的图：回首页点「🎨 只出一张图」出一张</div>';
+      return;
+    }
+    if (empty) empty.innerHTML = "";
+    box.innerHTML = imgs.map(x => `<div class="imgCard" onclick="window.open('${withToken(x.url)}','_blank')">
+      <img src="${withToken(x.url)}" alt="" loading="lazy">
+      <div class="meta"><span>${x.ts ? fmt(x.ts) : ""}</span><span>${(x.size / 1048576).toFixed(1)}MB</span></div>
+    </div>`).join("");
+  } catch (e) {
+    if (empty) empty.innerHTML = '<div class="empty">连不上（检查令牌）</div>';
+  }
+}
+
+/** 作品页的两个分段：作品 / 图片 */
+function showWorksPane(which) {
+  const runs = which !== "images";
+  const segR = $("segRuns"), segI = $("segImages");
+  if (!segR || !segI) return;
+  segR.classList.toggle("on", runs);
+  segI.classList.toggle("on", !runs);
+  $("runsPane").hidden = !runs;
+  $("imagesPane").hidden = runs;
+  if (runs) { if (Date.now() - RUNS_FETCHED_AT > 10000) refreshRuns(); }
+  else refreshImages();
 }
 
 async function refreshRuns() {
@@ -988,12 +1046,15 @@ function showPage(name) {
   document.querySelectorAll("nav.bottom .bn").forEach(b => b.classList.toggle("on", b.dataset.page === name));
   if (name === "settings") refreshConfig();
   if (name === "works") {
+    if ($("imagesPane") && !$("imagesPane").hidden) refreshImages();
     // 切页就重拉整表太浪费（一次 ~17KB）：10 秒内刚拉过就不重复拉
-    if (Date.now() - RUNS_FETCHED_AT > 10000) refreshRuns();
+    else if (Date.now() - RUNS_FETCHED_AT > 10000) refreshRuns();
   }
   window.scrollTo(0, 0);
 }
 document.querySelectorAll("nav.bottom .bn").forEach(b => { b.onclick = () => showPage(b.dataset.page); });
+$("segRuns").onclick = () => showWorksPane("runs");
+$("segImages").onclick = () => showWorksPane("images");
 $("gearBtn").onclick = () => showPage("settings");
 $("backBtn").onclick = () => showPage("create");
 // 参考图抽屉：创作页「＋」与会话页入口**共用同一份 UI**。
@@ -1065,6 +1126,7 @@ const PILL_ACTS = {
                  chatHint("说出画面，点「出一张图」——不进闭环、不编剧、不拍视频，出图免费"); },
   character: openRef,
   project: () => { showPage("session"); $("projectInput").focus(); chatHint("续做同一部：先填项目名，它就会接着上一部做"); },
+  myimages: () => { showPage("works"); showWorksPane("images"); },
 };
 document.querySelectorAll("#pillList .pill").forEach(b => {
   b.onclick = () => { const fn = PILL_ACTS[b.dataset.act]; if (fn) fn(); };

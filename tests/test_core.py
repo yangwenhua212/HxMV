@@ -68,6 +68,41 @@ class MarkOrphansTest(unittest.TestCase):
             srv.RUNS_DIR = old
 
 
+# ------------------------------------------------- 「只出一张图」的历史要看得见
+class ScanImagesTest(unittest.TestCase):
+    def test_scan_images_finds_flat_and_subdir(self):
+        """面板出图落在根下、CLI 出图落在时间戳子目录里，两边都要列出来；非图片不算。"""
+        from hxmv import server as srv
+
+        old = srv.IMAGES_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                srv.IMAGES_DIR = tmp
+                with open(os.path.join(tmp, "a.png"), "wb") as f:
+                    f.write(b"x")
+                sub = os.path.join(tmp, "20260101-000000")
+                os.makedirs(sub)
+                with open(os.path.join(sub, "b.png"), "wb") as f:
+                    f.write(b"y")
+                with open(os.path.join(tmp, "note.txt"), "w", encoding="utf-8") as f:
+                    f.write("ignore me")
+                got = {x["name"] for x in srv._scan_images()}
+                self.assertEqual(got, {"a.png", "20260101-000000/b.png"})
+                for x in srv._scan_images():
+                    self.assertTrue(x["url"].startswith("/api/image/file?name="))
+        finally:
+            srv.IMAGES_DIR = old
+
+    def test_image_name_whitelist_blocks_traversal(self):
+        """取图的名字只允许「可打印名」或「一级子目录/名」——路径穿越必须被挡。"""
+        from hxmv import server as srv
+
+        self.assertTrue(srv._IMAGE_REL_RE.match("a.png"))
+        self.assertTrue(srv._IMAGE_REL_RE.match("20260101-000000/b.png"))
+        for bad in ("../panel.env", "a/b/c.png", "/etc/passwd", "a/../../x.png", ""):
+            self.assertIsNone(srv._IMAGE_REL_RE.match(bad), bad)
+
+
 # ---------------------------------------------------------------- 首帧裁切
 class CropBoxTest(unittest.TestCase):
     def test_keep_returns_full_image(self):

@@ -50,8 +50,9 @@ from .core.brain import Brain
 from .core.loop import run
 from .providers import registry
 
-RUNS_DIR = os.path.expanduser("~/.hxmv/runs")
-IMAGES_DIR = os.path.expanduser("~/.hxmv/images")     # 「只出一张图」的落盘处（与 run 产物分开）
+RUNS_DIR = os.environ.get("HXMV_RUNS_DIR") or os.path.expanduser("~/.hxmv/runs")
+# 可覆盖：跑第二个实例做验证时不碰真存档（也让 CLI 测试能隔离）
+IMAGES_DIR = os.environ.get("HXMV_IMAGES_DIR") or os.path.expanduser("~/.hxmv/images")   # 「只出一张图」的落盘处
 DL_DIR = os.environ.get("HXMV_DL_DIR", os.path.expanduser("~/.hxmv/dl"))
 HOOKS_DIR = os.environ.get("HXMV_HOOKS_DIR", os.path.expanduser("~/.hxmv/hooks"))
 STARTED_AT = time.time()
@@ -328,6 +329,40 @@ def _poster_for(run_id: str) -> str:
     return ""
 
 
+# 取图用的名字：最多「一级子目录/文件名」，且**每段都不许以点开头**
+# （之前写成 ^[A-Za-z0-9._-]+$ 时 "../panel.env" 能过——虽然 realpath 兜住了，正则本身也该堵死）
+_IMAGE_REL_RE = re.compile(r"^(?!\.)[A-Za-z0-9._-]+(/(?!\.)[A-Za-z0-9._-]+)?$")
+
+
+def _scan_images() -> list[dict]:
+    """扫「只出一张图」的落盘目录：面板出图在根下，CLI 出图在时间戳子目录里，都要看得见。"""
+    out: list[dict] = []
+    if not os.path.isdir(IMAGES_DIR):
+        return out
+
+    def walk(rel_dir: str = "") -> None:
+        try:
+            names = sorted(os.listdir(os.path.join(IMAGES_DIR, rel_dir)), reverse=True)
+        except OSError:
+            return
+        for name in names:
+            full = os.path.join(IMAGES_DIR, rel_dir, name)
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            if os.path.isdir(full):
+                walk(rel)
+            elif name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                try:
+                    st = os.stat(full)
+                except OSError:
+                    continue
+                out.append({"name": rel, "ts": st.st_mtime, "size": st.st_size,
+                            "url": "/api/image/file?name=" + quote(rel)})
+
+    walk()
+    out.sort(key=lambda x: x["ts"], reverse=True)
+    return out[:200]
+
+
 def _mark_orphans() -> None:
     """启动时给上次没跑完的 run 补一条「被打断 + 原因」。
 
@@ -546,11 +581,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_err(401, "unauthorized")
                 return
             name = (parse_qs(u.query).get("name") or [""])[0]
-            if not name or "/" in name or "\\" in name or name.startswith("."):
+            # 允许「子目录/文件名」一级（CLI 出图落在时间戳子目录），但不接受任何越界路径
+            if not name or name.startswith(".") or not _IMAGE_REL_RE.match(name):
                 self._send_err(400, "name 不合法")
                 return
-            path = os.path.join(IMAGES_DIR, name)
-            if not os.path.isfile(path):
+            root = os.path.realpath(IMAGES_DIR)
+            path = os.path.realpath(os.path.join(root, name))
+            if not path.startswith(root + os.sep) or not os.path.isfile(path):
                 self._send_err(404, f"图不存在: {name}")
                 return
             try:
@@ -559,8 +596,10 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as e:
                 self._send_err(500, f"读图失败: {e}")
                 return
+            ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                     ".webp": "image/webp"}.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
             self.send_response(200)
-            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
@@ -678,6 +717,14 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/runs":
             self._send_json({"runs": _scan_runs()})
+            return
+
+        if p == "/api/images":
+            # 「只出一张图」的历史（退出页面后还能找回来）
+            if not self._authed():
+                self._send_err(401, "unauthorized")
+                return
+            self._send_json({"images": _scan_images()})
             return
 
         if p == "/api/ref":

@@ -33,6 +33,8 @@ HxMV 侧已经就绪（本文档末尾列了实测证据），HxSync 侧按下�
 | `/api/config` | GET | **接口配置状态**（面板设置页用）：`providers[]`（**由服务端 `providers/registry.py` 生成**，加一家 API 不用改客户端：`id`/`name`/`key_hint`/`configured`/`masked`/`is_default`/`options[{name,label,current,default,choices[{id,cost}]}]`）、`default`（默认生成家，空=自动挑）、`generators[]`（可选生成器 `{id,name,ready}`）、`vision{ready,model}`。明文 Key 永不回传 |
 | `/api/config` | POST `{provider,key?,video_model?,image_model?,vision_model?,default?}` | **保存接口配置**（写入实例本机 `~/.hxmv/config.json`，600）。档位名以服务端注册表为准（未知档位会被忽略）；`default:true` = 把这家设为默认生成家；保存后**立即生效**，不用重启 |
 | `/api/chat` | POST `{message, project?, history?}` | **对话入口**：一句话 → `{reply, goal, llm}`。`goal` 非空时客户端给个「开工」按钮（填进目标框再走 `/api/run`）；**本接口不落盘、不开工、不烧钱**。没配模型 Key 时 `llm:false` 且 `goal` = 用户原话（可跑性是底线） |
+| `/api/images` | GET | 「只出一张图」的历史（面板出图 + CLI 出图都在）→ `{images:[{name, ts, size, url}]}`，最新在前 |
+| `/api/image/file?name=` | GET | 同上取图；`name` 允许「一级子目录/文件名」（CLI 落在时间戳子目录），每段不许以点开头 |
 | `/api/image` | POST `{prompt, ratio?}` | **只出一张图**（不进闭环、不编剧、不拍视频）：用默认家出图 → `{ok, provider, label, model, name, url}`；出图 API 没成功时回 **502**（不拿本地兜底图冒充）。`ratio` 默认 `1:1`，可 `16:9`/`9:16` |
 | `/api/image/file?name=` | GET | 取回上面出的图（文件名白名单校验，防穿越） |
 | `/api/discard` | POST `{run_id}` | **不满意就删**：删掉该 run 的产物目录 + 撤销它在项目档案里的登记（角色/场景/镜头/集数）；正在跑的 run 返回 409。返回 `{ok, removed_files, removed_records}` |
