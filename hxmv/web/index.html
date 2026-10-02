@@ -382,6 +382,9 @@
         <div id="worksEmpty"></div>
       </div>
       <div id="imagesPane" hidden>
+        <div class="dim" style="font-size:12px;margin:0 0 8px">
+          自己出的图 + 作品里画的图（角色/场景/首尾帧）+ 项目档案里的参考图
+        </div>
         <div id="imgList"></div>
         <div id="imgEmpty"></div>
       </div>
@@ -673,13 +676,13 @@ async function refreshImages() {
     const imgs = d.images || [];
     if (!imgs.length) {
       box.innerHTML = "";
-      if (empty) empty.innerHTML = '<div class="empty">还没有出的图：回首页点「🎨 只出一张图」出一张</div>';
+      if (empty) empty.innerHTML = '<div class="empty">还没有图：回首页点「🎨 只出一张图」出一张，或跑一条作品（角色/场景图也会收在这里）</div>';
       return;
     }
     if (empty) empty.innerHTML = "";
     box.innerHTML = imgs.map(x => `<div class="imgCard" onclick="window.open('${withToken(x.url)}','_blank')">
       <img src="${withToken(x.url)}" alt="" loading="lazy">
-      <div class="meta"><span>${x.ts ? fmt(x.ts) : ""}</span><span>${(x.size / 1048576).toFixed(1)}MB</span></div>
+      <div class="meta"><span>${esc(x.src || "")}${x.note ? " · " + esc(x.note) : ""}</span><span>${x.ts ? fmt(x.ts) : ""} · ${(x.size / 1048576).toFixed(1)}MB</span></div>
     </div>`).join("");
   } catch (e) {
     if (empty) empty.innerHTML = '<div class="empty">连不上（检查令牌）</div>';

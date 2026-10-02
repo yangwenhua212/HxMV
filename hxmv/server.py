@@ -356,11 +356,91 @@ def _scan_images() -> list[dict]:
                 except OSError:
                     continue
                 out.append({"name": rel, "ts": st.st_mtime, "size": st.st_size,
-                            "url": "/api/image/file?name=" + quote(rel)})
+                            "url": "/api/image/file?name=" + quote(rel),
+                            "src": "出图", "note": "只出一张图", "_p": full})
 
     walk()
     out.sort(key=lambda x: x["ts"], reverse=True)
     return out[:200]
+
+
+def _scan_run_images(limit: int = 60) -> list[dict]:
+    """闭环里画的图（角色/场景/首尾帧）——它们是 run 的中间产物，以前面板上看不见。"""
+    out: list[dict] = []
+    if not os.path.isdir(RUNS_DIR):
+        return out
+    for name in sorted(os.listdir(RUNS_DIR), reverse=True)[:25]:
+        art = os.path.join(RUNS_DIR, name, "artifacts")
+        if not os.path.isdir(art):
+            continue
+        goal = ""
+        ev = os.path.join(RUNS_DIR, name, "events.jsonl")
+        if os.path.isfile(ev):
+            try:
+                with open(ev, encoding="utf-8") as fh:
+                    first = fh.readline()
+                goal = (json.loads(first).get("goal") or "") if first.strip() else ""
+            except (OSError, ValueError, json.JSONDecodeError):
+                goal = ""
+        for fn in sorted(os.listdir(art), reverse=True):
+            if not fn.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                continue
+            path = os.path.join(art, fn)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            out.append({"name": f"{name}/{fn}", "ts": st.st_mtime, "size": st.st_size,
+                        "url": f"/api/artifact?run_id={quote(name)}&name={quote(fn)}",
+                        "src": "作品", "note": goal[:16], "_p": path})
+    out.sort(key=lambda x: x["ts"], reverse=True)
+    return out[:limit]
+
+
+def _scan_project_images(limit: int = 40) -> list[dict]:
+    """项目档案里登记的角色/场景图（续做同一部时会复用它们，所以也值得能翻到）。"""
+    from .core import project as project_mod
+
+    out: list[dict] = []
+    root = os.path.expanduser("~/.hxmv/projects")
+    if not os.path.isdir(root):
+        return out
+    for pid in sorted(os.listdir(root)):
+        try:
+            proj = project_mod.Project.load(pid)
+        except Exception:  # noqa: BLE001 —— 档案坏了不该把整页拖垮
+            continue
+        for kind, book in (("character", getattr(proj, "characters", {}) or {}),
+                           ("scene", getattr(proj, "scenes", {}) or {})):
+            for key, hit in book.items():
+                path = (hit or {}).get("path") or ""
+                if not path or not os.path.isfile(path):
+                    continue
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                out.append({"name": os.path.basename(path), "ts": st.st_mtime, "size": st.st_size,
+                            "url": (f"/api/ref/image?project={quote(pid)}&kind={kind}"
+                                    f"&key={quote(str(key))}"),
+                            "src": "项目", "note": pid, "_p": path})
+    out.sort(key=lambda x: x["ts"], reverse=True)
+    return out[:limit]
+
+
+def _scan_gallery() -> list[dict]:
+    """图片页要的全部：自己出的图 + 闭环画的图 + 项目档案里的图，按时间倒序、同一张只出现一次。"""
+    items = _scan_images() + _scan_run_images() + _scan_project_images()   # 先出现的来源优先（作品 > 项目）
+    seen: set[str] = set()
+    uniq: list[dict] = []
+    for it in items:
+        key = it.pop("_p", None) or it.get("name")
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(it)
+    uniq.sort(key=lambda x: x["ts"], reverse=True)
+    return uniq[:120]
 
 
 def _mark_orphans() -> None:
@@ -724,7 +804,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 self._send_err(401, "unauthorized")
                 return
-            self._send_json({"images": _scan_images()})
+            self._send_json({"images": _scan_gallery()})
             return
 
         if p == "/api/ref":
