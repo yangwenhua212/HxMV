@@ -1,8 +1,31 @@
 # Provider 接入指南
 
-把 HxMV 接到真实视频生成服务（智谱/可灵/Veo/Runway/即梦…）的说明书。
+把 HxMV 接到真实视频生成服务的说明书。**HxMV 天生多 API**：有哪几家由
+`hxmv/providers/registry.py` 一张表说了算，工厂/面板设置页/CLI/自检/健康检查全从它读。
 
-## 已接好的真实服务：智谱 CogVideoX-Flash（免费）
+## 加一家 API 要改什么（就这五处 + 注册表一条）
+
+一家 API 与另一家的差别其实只有五处，其余（档案复用、参考图解析、首帧生成、尾帧派生、
+指纹与缓存复用、工程修正、结果登记）都在 `providers/api_video.py` 里，子类**一行都不用重写**：
+
+| # | 差异点 | 子类提供 | 智谱 | Agnes |
+|---|---|---|---|---|
+| 1 | 视频任务请求体 | `_submit_body()` | `videos/generations` + size/fps/quality | `videos` + mode/seconds/aspect_ratio |
+| 2 | 轮询取结果 | `_poll_url()` | `async-result/{id}`，`task_status` | `/agnesapi?video_id=…&model_name=…`，`status` |
+| 3 | 出图请求体 | `_image_body()` | `size="1344x768"` | `size="1K"` + `ratio` |
+| 4 | 产物下载带不带令牌 | `download_auth` | 要 | **不要**（Agnes 产物域名带了会 401） |
+| 5 | 能力与档位 | `camera_support` / `COST_UNITS` / `MAX_DURATION` / `FIRST_LAST_MODELS` | flash 只有提示词 | keyframe 首尾帧 |
+
+```python
+# 1) 写适配器：hxmv/providers/<你的>.py，继承 ApiVideoProvider，填上面五处（几十行）
+# 2) 注册：hxmv/providers/registry.py 的 SPECS 里加一条 Spec(...)（中文名/Key 从哪拿/有哪些档位/默认档）
+# 3) 完事 —— 工厂、`--provider <名字>`、`--set-key <名字>`、面板设置页、doctor、/api/config 自动认它
+```
+
+**能力别吹**：`camera_support`/`MAX_DURATION` 声明错了，闭环就会按它挑落点（声明了首尾帧却做不到 →
+判据判死好片）。声明放在适配器类里，注册表不替模型吹。
+
+## 已接好的真实服务①：智谱 CogVideoX-Flash（免费）
 
 `hxmv/providers/zhipu_video.py`，开箱可用：
 
@@ -112,3 +135,33 @@ HXMV_PROVIDER=fake python3 -m hxmv "雪地里的柯基"
 ```
 
 `hxmv/providers/fake_api.py` 仿真真实服务：两段式提交/轮询、按 cfg_scale 决定一致性缺陷、12% 概率上游 503（验证基础设施重试）。跑通它 = 你的适配器接口写对了。
+
+## 已接好的真实服务②：Agnes AI（flash 档限免）
+
+`hxmv/providers/agnes_video.py`，网关 `https://apihub.agnes-ai.com/v1`（OpenAI 兼容；
+同一把 Key 同时管画面/视频/大脑）：
+
+```bash
+python3 -m hxmv --set-key agnes <你的KEY>          # platform.agnes-ai.com → API Keys
+python3 -m hxmv --key-status
+python3 -m hxmv --provider agnes --project 柯基短剧 "柯基在雪地里奔跑"
+python3 -m hxmv --default agnes                    # 设为「默认用哪家」（面板设置页里也能点）
+```
+
+| 项 | 说明 |
+|---|---|
+| 视频档位 | `agnes-video-2.5-flash`（限免，只出 720P 1280×704）/ `agnes-video-2.5`（按秒计费） |
+| 图像档位 | `agnes-image-2.5-flash`（限免；16:9 1K = 1312×736） |
+| 图生视频 | `mode=keyframe`：`first_frame`/`last_frame` 吃 data URL → 与智谱一样**不需要图床** |
+| 时长 | 4–12 秒（字符串），执行器按 `MAX_DURATION` 钳制，不会要不到硬要 |
+| 检索 | 必须带 `model_name`（不带只对 text 模式有效）；轮询地址不在 `/v1` 下 |
+| 下载 | **不能带 Authorization**（产物 CDN 带了返回 401） |
+| 免费档限制 | 文本 **10 次/分钟**、出图 1K 10 次/分、**视频排队+限流**（实测连投会 429/`video_queue_full`） |
+| 提速 | 只有官方 Token Plan = **订阅制** → 本项目按「只接受按量充值」的红线**不买**，用免费档就接受排队 |
+
+没 Key 的链路验证同上（`tools/fake_zhipu_api.py` 改指各家 base 即可）。
+
+## 只有骨架的：可灵（`kling_example.py`，`stub=True`）
+
+类还在仓库里当**新适配器的模板**，但没实现生成，所以注册表标了 `stub=True`：
+不进面板设置页、不进 doctor、不会被自动挑中（想试就显式 `--provider kling`）。

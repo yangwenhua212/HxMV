@@ -125,7 +125,7 @@ def _execute_batch(executor, tasks: list, state, emit, verbose: bool,
 
 def banner(state: ExecutionState) -> None:
     print("\n" + "═" * 52)
-    print(f"  HxMV 自主控制闭环  v0.9 · 自己写剧情 + 会运镜")
+    print(f"  HxMV 自主控制闭环  v0.10 · 多 API（智谱/Agnes）+ 会写剧情 + 会运镜")
     print(f"  目标：{state.goal}")
     print("═" * 52)
 

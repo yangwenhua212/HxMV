@@ -1,17 +1,18 @@
-"""轻量 LLM 客户端（OpenAI 兼容协议，零第三方依赖）。
+"""轻量 LLM 客户端（OpenAI 兼容协议，零第三方依赖）——**多家通用**。
 
 端点解析顺序（`endpoint()`）：
-  1. 显式 `OPENAI_API_KEY` / `OPENAI_BASE_URL` + `HXMV_LLM_MODEL` —— 可指 DeepSeek 等任意兼容端点；
-  2. 否则用平台里存的智谱 Key（`--set-key zhipu`）—— **一个 Key 同时管视频生成、视觉评审、规划**；
+  1. 显式 `OPENAI_API_KEY` / `OPENAI_BASE_URL` + `HXMV_LLM_MODEL`：可指任意兼容端点；
+  2. 否则用**当前这家的 Key**（`active_provider()`：本轮 `HXMV_PROVIDER` → 面板选的默认家
+     → 第一个配了 Key 的家）—— **一个 Key 同时管画面/视频/规划**，这是 v0.6 定的规矩；
   3. 都没有 = 空 Key，Planner 走 Mock，闭环骨架仍可完全离线跑通。
 任何网络失败自动抛回，由调用方降级 Mock。
 
-视觉评审（v0.7 新增）：`chat_vision()` 把**真帧**（base64 JPEG data URL）交给视觉模型——
+视觉评审（v0.7）：`chat_vision()` 把**真帧**（base64 JPEG data URL）交给视觉模型——
 这就是把 L3「拿文字猜画面」的假闭环改成真闭环的那一步。
-**必须知道模型会看图**：走智谱 Key 时默认 `glm-4v-flash`；用其它 OpenAI 兼容端点则
-必须显式配 `HXMV_VLM_MODEL`。主 LLM 多半是纯文本模型，把图发给它只会被忽略而答得一本正经——
-那比不检查更坏。拿不到可用视觉模型 = `vision_available()` 为假，
-调用方如实标注「未做视觉检查」，不许冒充看过。
+**必须知道模型会看图**：每家注册表里声明了自己的默认视觉档（智谱 glm-4v-flash、
+Agnes agnes-2.5-flash，两者都实测能看图）；换成别的兼容端点则必须显式配 `HXMV_VLM_MODEL`。
+主 LLM 多半是纯文本模型，把图发给它只会被忽略而答得一本正经——那比不检查更坏。
+拿不到可用视觉模型 = `vision_available()` 为假，调用方如实标注「未做视觉检查」，不许冒充看过。
 """
 from __future__ import annotations
 
@@ -22,52 +23,72 @@ import urllib.request
 
 from .. import USER_AGENT
 
-
-ZHIPU_BASE = "https://open.bigmodel.cn/api/paas/v4"
 OPENAI_BASE = "https://api.openai.com/v1"
-ZHIPU_TEXT_MODEL = "glm-4-flash"      # 免费档
-ZHIPU_VISION_MODEL = "glm-4v-flash"   # 免费档
 
 
-def endpoint() -> tuple[str, str, bool]:
-    """返回 (base_url, api_key, 是否走平台里存的智谱 Key)。
+def active_provider() -> str:
+    """这一轮谁当大脑：显式 HXMV_PROVIDER（能出图的真 API 那家）→ 面板选的默认 → 第一个配了 Key 的。
 
-    显式环境变量优先；否则回落到 `~/.hxmv/config.json` 里的智谱 Key——
-    用户只需要 `--set-key zhipu <key>` 一次，视频/视觉/规划就全通了。
+    为什么认「配了 Key 且有 base」：`--provider local` 跑本地渲染时大脑仍该用已配好的
+    那家 LLM（local 没有 base/Key，自动跳过），否则一换 provider 规划就退回 Mock。
     """
+    from ..providers import registry
+    from . import config as cfg
+    for name in (os.environ.get("HXMV_PROVIDER", "").strip().lower(), cfg.default_provider()):
+        spec = registry.get(name)
+        if spec and spec.base_url and cfg.api_key(spec.id):
+            return spec.id
+    for spec in registry.api_specs():
+        if spec.base_url and cfg.api_key(spec.id):
+            return spec.id
+    return ""
+
+
+def endpoint() -> tuple[str, str, str]:
+    """返回 (base_url, api_key, provider_id)。provider_id 为空 = 没有任何可用 Key。"""
     key = os.environ.get("OPENAI_API_KEY")
     if key:
-        return os.environ.get("OPENAI_BASE_URL", OPENAI_BASE).rstrip("/"), key, False
-    try:
-        from . import config as cfg          # 延迟导入：避免与 config 形成环
-        zhipu = cfg.api_key("zhipu")
-    except Exception:
-        zhipu = None
-    if zhipu:
-        return ZHIPU_BASE, zhipu, True
-    return os.environ.get("OPENAI_BASE_URL", OPENAI_BASE).rstrip("/"), "", False
+        return os.environ.get("OPENAI_BASE_URL", OPENAI_BASE).rstrip("/"), key, "openai"
+    from . import config as cfg          # 延迟导入：避免与 config 形成环
+    pid = active_provider()
+    if pid:
+        return cfg.base_url(pid), cfg.api_key(pid), pid
+    return "", "", ""
 
 
 def llm_available() -> bool:
     return bool(endpoint()[1])
 
 
+def _tier(kind: str, env: str) -> str | None:
+    """档位解析：显式环境变量 → 这家在配置里选的档 → 注册表默认。
+
+    `kind` = 注册表里的档位类别（"text" / "vision"）。
+    """
+    explicit = os.environ.get(env)
+    if explicit:
+        return explicit
+    _, key, pid = endpoint()
+    if not key or not pid:
+        return None
+    from ..providers import registry
+    from . import config as cfg
+    spec = registry.get(pid)
+    if not spec:                                  # 自定义兼容端点：不认识图就别说会看
+        return None
+    return cfg.option(pid, f"{kind}_model") or spec.default_model(kind) or None
+
+
+def text_model() -> str | None:
+    return _tier("text", "HXMV_LLM_MODEL")
+
+
 def vision_model() -> str | None:
-    """视觉模型：显式 `HXMV_VLM_MODEL` 优先；走智谱 Key 时默认 glm-4v-flash（免费档）。
+    """视觉档：显式 `HXMV_VLM_MODEL` 优先；否则这家注册表里的视觉档（实测会看图的那类）。
 
     其它 OpenAI 兼容端点**不给默认值**——不知道对面模型会不会看图，就不许假装看了。
     """
-    explicit = os.environ.get("HXMV_VLM_MODEL")
-    if explicit:
-        return explicit
-    _, key, is_zhipu = endpoint()
-    if not (key and is_zhipu):
-        return None
-    try:
-        from . import config as cfg
-        return cfg.option("zhipu", "vlm_model") or ZHIPU_VISION_MODEL   # 面板设置页选的档位
-    except Exception:
-        return ZHIPU_VISION_MODEL
+    return _tier("vision", "HXMV_VLM_MODEL")
 
 
 def vision_available() -> bool:
@@ -75,13 +96,9 @@ def vision_available() -> bool:
     return llm_available() and bool(vision_model())
 
 
-def chat(messages: list[dict], temperature: float = 0.3, max_tokens: int = 1024,
-         model: str | None = None) -> str:
-    """调 chat completion，返回文本。失败抛异常（调用方自行降级）。"""
-    base, key, is_zhipu = endpoint()
-    if not key:
-        raise RuntimeError("没有可用的 LLM Key（既没 OPENAI_API_KEY，也没配智谱 Key）")
-    model = model or os.environ.get("HXMV_LLM_MODEL") or (ZHIPU_TEXT_MODEL if is_zhipu else "gpt-4o-mini")
+def _call_once(base: str, key: str, model: str, messages: list[dict],
+               temperature: float, max_tokens: int) -> tuple[str, str]:
+    """一次请求 → (正文, finish_reason)。"""
     body = json.dumps({
         "model": model,
         "messages": messages,
@@ -94,9 +111,26 @@ def chat(messages: list[dict], temperature: float = 0.3, max_tokens: int = 1024,
                  "Authorization": f"Bearer {key}",
                  "User-Agent": USER_AGENT},
     )
-    with urllib.request.urlopen(req, timeout=90) as resp:
+    with urllib.request.urlopen(req, timeout=120) as resp:
         data = json.loads(resp.read().decode())
-    return data["choices"][0]["message"]["content"].strip()
+    choice = (data.get("choices") or [{}])[0]
+    return str((choice.get("message") or {}).get("content") or "").strip(), \
+        str(choice.get("finish_reason") or "")
+
+
+def chat(messages: list[dict], temperature: float = 0.3, max_tokens: int = 1024,
+         model: str | None = None) -> str:
+    """调 chat completion，返回文本。失败抛异常（调用方自行降级）。"""
+    base, key, _ = endpoint()
+    if not key:
+        raise RuntimeError("没有可用的 LLM Key（既没 OPENAI_API_KEY，也没配任何一家的 Key）")
+    model = model or os.environ.get("HXMV_LLM_MODEL") or text_model() or "gpt-4o-mini"
+    text, finish = _call_once(base, key, model, messages, temperature, max_tokens)
+    if not text and finish == "length":
+        # 思维链型模型（实测 agnes-2.5-flash）会把预算全花在推理上、正文返回空字符串。
+        # 放大预算再问一次（不做无界重试：仍空就交给调用方降级，别装作拿到了答案）。
+        text, _ = _call_once(base, key, model, messages, temperature, max(max_tokens * 4, 2048))
+    return text
 
 
 def _data_url(path: str, max_bytes: int = 900_000) -> str | None:
@@ -129,5 +163,6 @@ def chat_vision(system: str, text: str, image_paths: list[str],
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": parts})
-    return chat(messages, temperature=temperature, max_tokens=max_tokens,
+    # 有些模型（如 agnes-2.5-flash）会先吐思维链，max_tokens 给小了正文就空 → 放宽一点
+    return chat(messages, temperature=temperature, max_tokens=max(max_tokens, 600),
                 model=vision_model())

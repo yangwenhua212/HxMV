@@ -240,47 +240,41 @@ def _auto_provider() -> str:
     为什么必须有这一步（实测踩过）：直接调 API 或 MCP 工具（不传 provider）时，
     HXMV_PROVIDER 为空 → 一律落 MockVideoExecutor → 出来的是假视频。
     老大看到的就是「做出来的东西不对」。真视频必须优先，Mock 只能是最后的兜底。
+
+    多 API 版：**面板选的默认家**（config.default_provider）优先，其次按注册表顺序
+    挑第一个配了 Key 的；一个都没有才退本地渲染（不花钱、不联网，但至少是真文件）。
     """
-    try:
-        from . import config as _cfg
-        if _cfg.configured("zhipu"):
-            return "zhipu"
-        if _cfg.configured("kling"):
-            return "kling"
-    except Exception:
-        pass
-    return "local"          # 本地 FFmpeg 真渲染：不花钱、不联网，但至少是真文件
+    from ..providers import registry
+    from . import config as _cfg
+    pick = _cfg.default_provider()
+    if pick and registry.configured(pick):
+        return pick
+    for spec in registry.api_specs():
+        if registry.configured(spec.id):
+            return spec.id
+    return "local"
 
 
 def make_executor(project=None, episode: int | None = None):
-    """工厂：HXMV_PROVIDER=local/fake/kling/zhipu → ProviderExecutor；否则/失败落 Mock。
+    """工厂：provider 名（见 `providers/registry.py`）→ ProviderExecutor；未知/失败落 Mock。
 
     project = 项目档案（跨 run 记忆风格/角色/已生成画面）：provider 会先查档，
     命中就复用已有画面，不重新生成。
+
+    **加一家 API 不用动这里**——注册表里每条 api provider 自带「怎么建」；
+    并发副本也走同一个工厂（`parallel_safe` 由 provider 自己声明）。
     """
+    from ..providers import registry
     name = os.environ.get("HXMV_PROVIDER", "").strip().lower() or _auto_provider()
-    if name:
-        try:
-            if name == "mock":
-                return MockVideoExecutor(project=project)
-            if name == "local":
-                from ..providers.local_render import LocalRenderProvider
-                return ProviderExecutor(LocalRenderProvider(project=project),
-                                        factory=lambda: LocalRenderProvider(project=project))
-            if name == "fake":
-                from ..providers.fake_api import FakeApiProvider
-                return ProviderExecutor(FakeApiProvider(project=project),
-                                        factory=lambda: FakeApiProvider(project=project))
-            if name in ("zhipu", "bigmodel", "cogvideo"):
-                from ..providers.zhipu_video import ZhipuVideoProvider
-                return ProviderExecutor(ZhipuVideoProvider(project=project),
-                                        factory=lambda: ZhipuVideoProvider(project=project))
-            if name in ("kling", "klingai"):
-                from ..providers.kling_example import KlingStyleProvider
-                # 可灵适配器还是骨架（TODO 未实现），且并发提交会撞它的配额——
-                # 明确不给工厂：宁可不并行，也不要给用户一个会 429 的"加速"
-                return ProviderExecutor(KlingStyleProvider(project=project))
-            raise ProviderError(f"未知 provider: {name}", retryable=False)
-        except ProviderError as e:
-            print(f"⚠ {e} → 降级 MockVideoExecutor")
-    return MockVideoExecutor(project=project)
+    if name in ("", "mock"):
+        return MockVideoExecutor(project=project)
+    spec = registry.get(name)
+    if not (spec and spec.cls):
+        print(f"⚠ 未知 provider: {name} → 降级 MockVideoExecutor")
+        return MockVideoExecutor(project=project)
+    try:
+        factory = lambda: spec.create(project=project)      # noqa: E731
+        return ProviderExecutor(factory(), factory=factory)
+    except ProviderError as e:
+        print(f"⚠ {e} → 降级 MockVideoExecutor")
+        return MockVideoExecutor(project=project)

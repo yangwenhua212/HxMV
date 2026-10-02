@@ -296,7 +296,14 @@
   .quick-art[hidden] { display: none; }
   .quick-art img { width: 66px; height: 42px; object-fit: cover; border-radius: 8px;
                    border: 1px solid var(--border); background: var(--panel2); }
-  .quick-art .qa-tip { font-size: 12px; color: var(--dim); }
+  /* 设置页：每家 API 一张卡（由注册表渲染，加一家不用动前端） */
+  .cfgOne { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+  .cfgOne:first-child { border-top: none; padding-top: 0; margin-top: 4px; }
+  .cfgOne .kv { margin-top: 8px; }
+  .cfgOne .kv:first-child b { min-width: 0; }
+  .cfgOne select { flex: 1; min-width: 0; }
+  .ghost { background: none !important; color: var(--accent-strong) !important;
+           border: 1px solid var(--accent) !important; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -317,7 +324,7 @@
       </div>
 
       <div class="pill-list" id="pillList">
-        <button class="pill" data-act="seedance"><span class="pi">⚡</span>沉浸式短片 · 智谱真视频<span class="tag">免费</span></button>
+        <button class="pill" data-act="seedance"><span class="pi">⚡</span>沉浸式短片 · 真视频生成<span class="tag">免费</span></button>
         <button class="pill" data-act="focus"><span class="pi">▶</span>输入灵感，智能生视频</button>
         <button class="pill" data-act="img2video"><span class="pi">🖼</span>照片跟我动（图生视频）<span class="tag new">新</span></button>
         <button class="pill" data-act="multi"><span class="pi">🎞</span>一镜到底 · 多镜头成片</button>
@@ -379,11 +386,9 @@
       <div class="chatbar">
         <div class="row">
           <select id="providerSel">
-            <option value="zhipu">智谱 AI 真视频（免费）</option>
+            <option value="">自动挑（注册表里第一家有 Key 的）</option>
             <option value="local">本地真渲染</option>
             <option value="mock">模拟世界</option>
-            <option value="fake">线上仿真</option>
-            <option value="kling">可灵 API</option>
           </select>
           <input id="projectInput" placeholder="项目名（可留空）">
         </div>
@@ -425,37 +430,8 @@
 
       <div class="card">
         <h3>接口配置</h3>
-        <div class="kv">
-          <b>智谱 AI</b><span class="st no" id="stZhipu">未配置</span>
-        </div>
-        <div class="kv">
-          <input id="keyZhipu" type="password" placeholder="粘贴 API Key" autocomplete="off">
-          <button id="saveZhipu">保存</button>
-        </div>
-        <div class="kv">
-          <b>视频模型</b>
-          <select id="videoModel">
-            <option value="cogvideox-flash">CogVideoX-Flash · 免费</option>
-            <option value="cogvideox-3">CogVideoX-3 · 1 元/次</option>
-            <option value="cogvideox-2">CogVideoX-2 · 0.5 元/次</option>
-          </select>
-        </div>
-        <div class="kv">
-          <b>视觉评审</b>
-          <select id="vlmModel">
-            <option value="glm-4v-flash">GLM-4V-Flash · 免费</option>
-            <option value="glm-4.6v-flashx">GLM-4.6V-FlashX · 0.15 元/百万</option>
-            <option value="glm-4.6v">GLM-4.6V · 1 元/百万</option>
-          </select>
-          <span class="st no" id="vlmState">未开启</span>
-        </div>
-        <div class="kv" style="margin-top:16px">
-          <b>可灵</b><span class="st no" id="stKling">未配置</span>
-        </div>
-        <div class="kv">
-          <input id="keyKling" type="password" placeholder="粘贴 API Key（可选）" autocomplete="off">
-          <button id="saveKling">保存</button>
-        </div>
+        <div id="cfgCards"></div>
+        <div class="kv"><b>视觉评审</b><span class="st no" id="vlmState">未开启</span></div>
         <div class="kv"><span id="cfgHint"></span></div>
       </div>
     </section>
@@ -997,7 +973,7 @@ $("quickRef").onchange = async () => {
   await quickAddMaterials(files);
 };
 const PILL_ACTS = {
-  seedance: () => { $("providerSel").value = "zhipu"; ideaTip("已选：智谱 AI 真视频（免费档）"); },
+  seedance: () => { $("providerSel").value = ""; ideaTip("已选：真视频生成（用设置里的默认家）"); },
   focus: () => $("ideaInput").focus(),
   img2video: openRef,
   multi: () => { $("ideaInput").value = "一个小猴子在花果山翻跟头，多镜头一镜到底，5 秒"; $("ideaInput").focus(); },
@@ -1022,39 +998,96 @@ $("ideaInput").addEventListener("keydown", e => { if (e.key === "Enter") ideaSen
 showPage(TOKEN ? "create" : "settings");
 
 
-// ---------- 设置页：接口配置 ----------
+// ---------- 设置页：接口配置（有哪几家 = 服务端注册表说了算，面板只负责画）----------
 const cfgHint = (msg) => setHint("cfgHint", msg, { clearMs: 4000 });
+
+function renderGenerators(list) {
+  const sel = $("providerSel"), cur = sel.value;
+  sel.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = ""; auto.textContent = "自动挑（有 Key 的那家）";
+  sel.appendChild(auto);
+  for (const g of list || []) {                      // 注册表顺序 = 选单顺序
+    const o = document.createElement("option");
+    o.value = g.id; o.textContent = g.name + (g.ready ? "" : "（未配置）");
+    sel.appendChild(o);
+  }
+  sel.value = cur;
+}
+
+function renderProviders(list) {
+  const box = $("cfgCards");
+  box.innerHTML = "";
+  for (const p of list || []) {
+    const card = document.createElement("div");
+    card.className = "cfgOne";
+    const head = document.createElement("div");
+    head.className = "kv";
+    const title = document.createElement("b");
+    title.textContent = p.name + (p.is_default ? " · 默认" : "");
+    const st = document.createElement("span");
+    st.className = "st " + (p.configured ? "ok" : "no");
+    st.textContent = p.configured ? "已配置 " + p.masked : "未配置";
+    head.append(title, st);
+    card.appendChild(head);
+
+    const keyRow = document.createElement("div");
+    keyRow.className = "kv";
+    const keyInput = document.createElement("input");
+    keyInput.type = "password"; keyInput.placeholder = "粘贴 API Key"; keyInput.autocomplete = "off";
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "保存";
+    const defBtn = document.createElement("button");
+    defBtn.className = "ghost"; defBtn.textContent = p.is_default ? "已是默认" : "设为默认";
+    keyRow.append(keyInput, saveBtn, defBtn);
+    card.appendChild(keyRow);
+
+    const picks = [];
+    for (const opt of p.options || []) {               // 档位：视频 / 图像 / 视觉
+      const row = document.createElement("div");
+      row.className = "kv";
+      const lbl = document.createElement("b");
+      lbl.textContent = opt.label;
+      const sel = document.createElement("select");
+      for (const c of opt.choices) {
+        const o = document.createElement("option");
+        o.value = c.id; o.textContent = c.id + (c.cost ? " · " + c.cost : "");
+        sel.appendChild(o);
+      }
+      sel.value = opt.current || opt.default;
+      picks.push({ name: opt.name, el: sel });
+      row.append(lbl, sel);
+      card.appendChild(row);
+    }
+    const send = async (asDefault) => {
+      const body = { provider: p.id };
+      if (keyInput.value.trim()) body.key = keyInput.value.trim();
+      for (const pk of picks) body[pk.name] = pk.el.value;
+      if (asDefault) body.default = true;
+      try {
+        const d = await postJson("/api/config", body);
+        if (d.ok) { keyInput.value = ""; cfgHint("已保存，立即生效"); refreshConfig(); }
+        else cfgHint("保存失败，请重试");
+      } catch (e) { cfgHint("保存失败，请重试"); }
+    };
+    saveBtn.onclick = () => send(false);
+    defBtn.onclick = () => send(true);
+    for (const pk of picks) pk.el.onchange = () => send(p.is_default);
+    box.appendChild(card);
+  }
+}
+
 async function refreshConfig() {
   if (!TOKEN) { cfgHint("先在上面填令牌"); return; }
   try {
     const d = await (await hx("/api/config")).json();
     if (d.error) { cfgHint("令牌不对，配置读不到"); return; }
-    for (const p of d.providers) {
-      const el = p.id === "zhipu" ? $("stZhipu") : $("stKling");
-      el.textContent = p.configured ? "已配置 " + p.masked : "未配置";
-      el.className = "st " + (p.configured ? "ok" : "no");
-    }
-    $("videoModel").value = d.options.video_model;
-    $("vlmModel").value = d.options.vlm_model;
+    renderProviders(d.providers);
+    renderGenerators(d.generators);
     $("vlmState").textContent = d.vision.ready ? "已开启 · " + d.vision.model : "未开启";
     $("vlmState").className = "st " + (d.vision.ready ? "ok" : "no");
   } catch (e) { cfgHint("配置读取失败"); }
 }
-async function saveConfig(provider, keyId) {
-  const body = { provider };
-  const key = $(keyId).value.trim();
-  if (key) body.key = key;
-  if (provider === "zhipu") { body.video_model = $("videoModel").value; body.vlm_model = $("vlmModel").value; }
-  try {
-    const d = await postJson("/api/config", body);
-    if (d.ok) { $(keyId).value = ""; cfgHint("已保存，立即生效"); refreshConfig(); }
-    else cfgHint("保存失败，请重试");
-  } catch (e) { cfgHint("保存失败，请重试"); }
-}
-$("saveZhipu").onclick = () => saveConfig("zhipu", "keyZhipu");
-$("saveKling").onclick = () => saveConfig("kling", "keyKling");
-$("videoModel").onchange = () => saveConfig("zhipu", "keyZhipu");
-$("vlmModel").onchange = () => saveConfig("zhipu", "keyZhipu");
 
 // ---------- 对话（老大要求：HxMV 也要能聊天）----------
 // 说一句话 → 它回一句话 + 给出可执行目标；点「开工」才真的跑。不点就不烧钱、不落档。

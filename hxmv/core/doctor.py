@@ -14,6 +14,7 @@ import socket
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 from ..media import probe
 from . import config, llm
@@ -84,20 +85,24 @@ def run_checks(probe_network: bool = True) -> list[dict]:
         "fix": "" if writable else "检查目录权限/磁盘空间（df -h）",
     })
 
-    zhipu = config.api_key("zhipu")
-    checks.append({
-        "name": "智谱 Key（真 AI 视频）", "ok": bool(zhipu),
-        "detail": config.mask(zhipu) if zhipu else "未配置（只能用本地渲染/模拟世界）",
-        "fix": "" if zhipu else "python3 -m hxmv --set-key zhipu <KEY>（bigmodel.cn 免费申请）",
-    })
+    # 每一家真 API 生成服务一项（注册表里谁有 Key 谁亮）——加一家不用改这里
+    from ..providers import registry
+    for spec in registry.api_specs():
+        key = config.api_key(spec.id)
+        checks.append({
+            "name": f"{spec.label} Key（真 AI 视频）", "ok": bool(key),
+            "detail": config.mask(key) if key else "未配置",
+            "fix": "" if key else f"python3 -m hxmv --set-key {spec.id} <KEY>（{spec.key_hint}）",
+        })
 
     # 视觉评审 = L2 身份判定 / L3 语义评审真看画面（没有它这两层是像素/文字兜底，别当成看过）
     checks.append({
         "name": "视觉评审（L2/L3 真看图）", "ok": llm.vision_available(),
-        "detail": (f"{llm.vision_model()}（有 Key，抽帧真看图）" if llm.vision_available()
+        "detail": (f"{llm.vision_model()}（走 {llm.active_provider()}，抽帧真看图）"
+                   if llm.vision_available()
                    else "未配置 → L2 退回像素距离、L3 退回文字判断（结果里会标注未做视觉检查）"),
         "fix": "" if llm.vision_available() else
-               "export OPENAI_API_KEY=<KEY> OPENAI_BASE_URL=<兼容端点> HXMV_VLM_MODEL=<视觉模型，如 glm-4v-flash>",
+               "python3 -m hxmv --set-key <provider> <KEY>（注册表里那家自带能看图的视觉档）",
     })
 
     free_port = True
@@ -114,13 +119,15 @@ def run_checks(probe_network: bool = True) -> list[dict]:
 
     if probe_network:
         net = False
+        # 打当前这家的大脑网关（没有就退回智谱域名）：能通 = 云生成可用
+        host = urlsplit(config.base_url(llm.active_provider()) or "https://open.bigmodel.cn").netloc
         try:
-            with urllib.request.urlopen("https://open.bigmodel.cn", timeout=4):
+            with urllib.request.urlopen(f"https://{host}", timeout=4):
                 net = True
         except (urllib.error.URLError, OSError):
             net = False
         checks.append({
-            "name": "外网可达（云生成）", "ok": net,
+            "name": f"外网可达（{host}）", "ok": net,
             "detail": "通" if net else "不通（只能用本地渲染）",
             "fix": "" if net else "检查网络/代理；纯本地跑可忽略这一项",
         })

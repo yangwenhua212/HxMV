@@ -55,12 +55,15 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 | `core/brain.py` | **大脑**：持久记忆，自动注入/自动回写，会遗忘（详见下） |
 | `core/project.py` | **项目档案（v0.5）**：跨 run 记住风格/角色/场景/已生成画面与分集——续做不重画 |
 | `providers/local_render.py` | **真渲染 provider（v0.4）**：用系统 FFmpeg 真出片（资产/镜头/成片都落盘），参数真的决定可测质量 |
-| `providers/zhipu_video.py` | **真 AI 视频（v0.6）**：智谱 CogVideoX-Flash（免费）文/图生视频。**一张首帧只能锁一类**：默认锁角色（`cons.ref_use="scene"` 可改成锁场景），另一类靠提示词里写明（场景锁/角色锁）——不写清楚，模型会把参考图的背景一起搬过来（实测：给草地上的柯基照片 → 出来还是草地，要的雪地没出现） |
-| `core/config.py` | 本地凭据：`~/.hxmv/config.json`（权限 600），`--set-key` 一次配好，CLI 与 Web 共用 |
-| `providers/` | Provider 接口 + 可灵接入骨架 + fake 仿真（见 `docs/PROVIDERS.md`） |
+| `providers/registry.py` | **多 API 的单一真相**：加一家 API = 写一个适配器 + 这里加一条（工厂/面板/CLI/自检/健康检查全从它读）。注册表管"有哪些家、怎么建、有哪些档位"，能力声明（首尾帧/时长上限）留在适配器类里 |
+| `providers/api_video.py` | **AI 视频服务的公共实现**：档案复用、参考图解析、首帧生成、尾帧派生、指纹、工程修正（音量/黑场真做在产物上）、结果登记。一家 API 与另一家的差别只有五处（见 `PROVIDERS.md`），所以子类只有几十行 |
+| `providers/zhipu_video.py` | **智谱适配器**：CogVideoX-Flash（免费）/CogVideoX-3（首尾帧钉运镜）。**一张首帧只能锁一类**：默认锁角色（`cons.ref_use="scene"` 可改成锁场景），另一类靠提示词里写明（实测：给草地上的柯基照片 → 出来还是草地，要的雪地没出现） |
+| `providers/agnes_video.py` | **Agnes AI 适配器**：`agnes-video-2.5-flash`（限免 720P）/`agnes-video-2.5` + 出图 `agnes-image-2.5-flash`（限免）。`mode=keyframe` 用 `first_frame`/`last_frame` 吃 data URL → 与智谱一样不需要图床 |
+| `providers/local_render.py` | **本地真渲染**：系统 FFmpeg 真出片，不联网不花钱——也是真 API 出图失败时的兜底 |
+| `core/config.py` | 本地凭据与档位：`~/.hxmv/config.json`（权限 600）；`--set-key` / `--default` 一次配好，CLI 与 Web 共用 |
 | `server.py` | **Web 控制台 daemon**（纯 stdlib）：SSE 实时事件流 + run 存档 + 产物取回 + 单文件面板（生产页 / **设置页**：接口配置与模型档位）；面板里可直接**点批准/拒绝**人工审批点 |
 | `core/loop.py` | **闭环主体** + 三道护栏：**人工审批点**（`approve` 回调，付费/高危动作开工前先问，拒绝不产生任何费用）+ **基础设施熔断**（同一错误连倒 3 个任务即停，无效重试 20 次→6 次）+ **多镜头并行**（`HXMV_PARALLEL`：只并互相独立的镜头，评审/判定/档案写回严格串行，结果与串行等价） |
-| `tests/` | **单元测试（63 例，纯标准库）**：守住"指纹白名单全覆盖""Critic 建议必须可被 Refiner 执行""新增缺陷键五处同改""运镜规格真的落到任务约束上"等踩过的坑 |
+| `tests/` | **单元测试（95 例，纯标准库）**：守住"指纹白名单全覆盖""Critic 建议必须可被 Refiner 执行""新增缺陷键五处同改""运镜规格真的落到任务约束上""注册表完整性 / 工厂认表不认名字 / 大脑跟着选中的那家走"等踩过的坑 |
 
 ### v0.4「真产物 + 真眼睛」：哪部分是真的
 
@@ -91,7 +94,7 @@ Planner 只输出结构化 Task；执行/检测/判断/调参全部是确定性�
 |---|---|---|---|
 | `native` 原生参数 | 可灵 `camera_control`（simple 六轴） | 最硬 | 按量计费 |
 | `render` 自己渲染 | 本地 FFmpeg provider | 硬（自己画） | 0 |
-| `first_last` 首尾帧锚定 | 智谱 CogVideoX-3（`image_url` 传两张；第二张由首帧按运镜方向派生） | 硬（模型必须从 A 走到 B） | 1.05 元/镜头 |
+| `first_last` 首尾帧锚定 | 智谱 CogVideoX-3（`image_url` 传两张）、**Agnes `mode=keyframe`**（`first_frame`/`last_frame`）；第二张由首帧按运镜方向派生 | 硬（模型必须从 A 走到 B） | 智谱 1.05 元/镜头；Agnes flash 限免 |
 | `prompt` 提示词 | 智谱 CogVideoX-Flash（免费档）等 | 弱 | 0 |
 
 **判据**（这是"会运镜"和"写了句推送"的区别）：抽帧估全局位移与缩放（纯标准库双线性匹配，
@@ -188,10 +191,13 @@ python3 -m hxmv --provider local --project 柯基短剧 --episode 2 \
     "第2集：柯基跑到海边看浪"          # 角色图复用，只生成本集新镜头
 python3 -m hxmv --list-projects        # 看有哪些项目、做到第几集
 
-# 接真实 AI 视频生成（智谱 CogVideoX-Flash，免费；支持图生视频→角色一致）
-python3 -m hxmv --set-key zhipu <你的KEY>     # 一次配好，存 ~/.hxmv/config.json（600）
-python3 -m hxmv --key-status                  # 确认
+# 接真实 AI 视频生成（**多 API，不只一家**：有哪家见 providers/registry.py + docs/PROVIDERS.md）
+python3 -m hxmv --set-key zhipu <你的KEY>     # 智谱 CogVideoX-Flash（免费）
+python3 -m hxmv --set-key agnes <你的KEY>     # Agnes AI：视频/图像 flash 档限免（免费档有 RPM/排队限制）
+python3 -m hxmv --key-status                  # 看各家的 Key 与「默认用哪家」
+python3 -m hxmv --default agnes                # 选默认家（面板设置页也能点）
 python3 -m hxmv --provider zhipu --project 柯基短剧 --episode 1 "第1集：柯基在雪地里打滚"
+python3 -m hxmv --provider agnes --project 柯基短剧 --episode 2 "第2集：柯基跑到海边看浪"
 
 # 接真实生成服务（Provider 层，fake 仿真无需 key 可跑）
 HXMV_PROVIDER=fake python3 -m hxmv "雪地里的柯基"
@@ -241,7 +247,7 @@ python3 -m hxmv.server --host 0.0.0.0 --port 8668   # 局域网/公网访问
 - **参考图卡片**：填项目名 → 选**角色/场景** → 选图片 → **预览**（自动把设定表裁成 16:9 主视觉）→ 存为参考图。镜头就会从这张图开始动，不用碰命令行
 - **首帧只锁一类**：角色图当首帧（默认）→ 提示词额外写明「这张图只定角色长相，背景别抄它」；场景图当首帧（`ref_use="scene"`）→ 反过来锁角色。**首帧那张图实际是哪一类会进画面指纹**，所以切换不会复用错文件
 
-- **设置页**（顶部分页）直接配接口：粘贴智谱 / 可灵 Key、切视频模型档位（免费 / 付费）、切视觉评审档位，保存即生效——不用再命令行 `--set-key`，手机上也能配
+- **设置页**（顶部分页）直接配接口：**有几家 API 就有几张卡**（由服务端注册表渲染）、粘贴 Key、切视频/图像/视觉档位、点「设为默认」，保存即生效——不用再命令行 `--set-key`，手机上也能配
 
 ## 接进你自己的 Agent（MCP）
 
@@ -293,7 +299,8 @@ hermes mcp add hxmv --command /你的路径/hxmv/start_mcp.sh
 - **V0.7** ✅ 语义修正真落地（四条守卫真改提示词）+ 场景锁/角色锁（首帧只锁一类）
 - **V0.7** 🚧 **真视觉闭环 ✅**（L2 抽帧身份判定 + L3 抽帧语义评审，配 `HXMV_VLM_MODEL` 生效；未配则如实标注未做视觉检查）；资产一致性深化（参考图版本管理、跨镜头锁脸）、checkpoint 人工审批点 📋
 - **V0.8** ✅ 判据扩容 + 工程化 + 并行：`blurdetect` 真模糊（与"分辨率不足"分开判、分开修）、`scdet` 镜头切换（单镜头任务不许模型自己剪片）、`loudnorm`/`silencedetect` 抓"有音轨但全程静音"；**人工审批点**（人在回路的付费闸门）；基础设施熔断；**多镜头并行**（只并独立镜头，判定与写回仍串行）；三层评审并行 + 单层异常隔离；Brain/Project 原子写与锁；CI + 单元测试（43 例）
-- **V0.9** ✅ **自己写剧情 + 会运镜**：编剧（`STORYBOARD` 从空壳换成真结构化分镜，剧本 → 任务共用一条路）、运镜规格与落点能力声明（native/first_last/prompt/render）、`measure_camera` 真判运镜（方向+幅度）、同场戏接缝判据 + 成片淡入淡出转场、面板显示分镜与运镜人话（单元测试 63 例）
+- **V0.9** ✅ **自己写剧情 + 会运镜**：编剧（`STORYBOARD` 从空壳换成真结构化分镜，剧本 → 任务共用一条路）、运镜规格与落点能力声明（native/first_last/prompt/render）、`measure_camera` 真判运镜（方向+幅度）、同场戏接缝判据 + 成片淡入淡出转场、面板显示分镜与运镜人话
+- **V0.10** ✅ **多 API**：`providers/registry.py`（有哪几家 = 一张表，工厂/面板/CLI/自检/健康检查全从它读）+ `providers/api_video.py`（公共实现：档案复用/首帧/尾帧/指纹/修正/登记）+ 薄适配器 `zhipu_video` / **`agnes_video`**（新增：出图 + 视频 keyframe 首尾帧，吃 data URL 不需要图床）；面板设置页按注册表渲染（多一张卡就多一家，前端不用改）；`--default` 选默认家（单元测试 95 例）
 - **探索方向（未排期）** 📋 扩展到 Research / Coding / Design Agent——复用同一个控制内核（**不是排期，是方向**）
 
 ## 设计文档

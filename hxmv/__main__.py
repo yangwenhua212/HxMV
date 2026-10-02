@@ -60,18 +60,20 @@ def _make_approver(policy: str, executor):
 
 
 def main() -> int:
+    from .providers import registry      # provider 名单只认注册表（加一家不用改 CLI）
     ap = argparse.ArgumentParser(prog="hxmv", description="HxMV 自主内容生产闭环")
     ap.add_argument("goal", nargs="*", help="内容生产目标（缺省用示例）")
     ap.add_argument("--fresh", action="store_true", help="清空大脑后从零跑（演示学习曲线用）")
     ap.add_argument("--brain", default=None, help="大脑文件路径（默认 ~/.hxmv/brain.json）")
-    ap.add_argument("--provider", default=None,
-                    choices=["mock", "local", "fake", "zhipu", "kling"],
-                    help="生成器：mock=模拟世界（不出真文件，验证闭环内核） "
-                         "local=FFmpeg 真渲染 zhipu=智谱 CogVideoX-Flash（真 AI 视频，免费） "
-                         "fake=线上仿真 kling=可灵 API。"
-                         "不指定时自动挑：有 Key 走真 AI，否则走 local；想跑模拟世界请显式写 --provider mock")
+    ap.add_argument("--provider", default=None, choices=["mock"] + sorted(registry.SPECS),
+                    help="生成器（见 providers/registry.py）：mock=模拟世界（不出真文件，验证闭环内核）；"
+                         + "；".join(f"{s.id}={s.label}" for s in registry.SPECS.values())
+                         + "。不指定时自动挑：面板选的默认家 → 第一个配了 Key 的家 → local；"
+                           "想跑模拟世界请显式写 --provider mock")
     ap.add_argument("--set-key", nargs=2, default=None, metavar=("PROVIDER", "KEY"),
-                    help="写入 API Key 到 ~/.hxmv/config.json（例：--set-key zhipu <你的key>）")
+                    help="写入 API Key 到 ~/.hxmv/config.json（PROVIDER 见注册表，例：--set-key agnes <你的key>）")
+    ap.add_argument("--default", default=None, metavar="PROVIDER",
+                    help="选「默认用哪家」（面板里选的同一项）；不指定 provider 时按它生成")
     ap.add_argument("--key-status", action="store_true", help="查看各 provider 的 Key 是否已配置")
     ap.add_argument("--doctor", action="store_true",
                     help="部署自检：Python/ffmpeg/编码器/Key/目录/端口，缺什么给什么修复命令")
@@ -105,15 +107,30 @@ def main() -> int:
         if not key:
             print("⚠ Key 不能为空")
             return 1
+        if provider not in registry.SPECS:
+            print(f"⚠ 未知 provider: {provider}（可选：{', '.join(sorted(registry.SPECS))}）")
+            return 1
         shown = config.set_api_key(provider, key)
         print(f"✅ 已保存 {provider} 的 API Key：{shown}")
         print(f"   位置：{config.CONFIG_PATH}（权限 600，只本机可读）")
         return 0
+    if args.default is not None:
+        provider = args.default.strip().lower()
+        if provider and provider not in registry.SPECS:
+            print(f"⚠ 未知 provider: {provider}（可选：{', '.join(sorted(registry.SPECS))}）")
+            return 1
+        config.set_default_provider(provider)
+        print(f"✅ 默认生成家已设为：{provider or '（自动挑）'}")
+        return 0
     if args.key_status:
         print(f"配置文件：{config.CONFIG_PATH}")
-        for prov in ("zhipu", "kling"):
-            k = config.api_key(prov)
-            print(f"  {prov:8s} {'✅ 已配置 ' + config.mask(k) if k else '❌ 未配置'}")
+        print(f"默认生成家：{config.default_provider() or '（自动挑：第一个配了 Key 的）'}")
+        for spec in registry.SPECS.values():
+            if not spec.needs_key:
+                continue
+            k = config.api_key(spec.id)
+            print(f"  {spec.id:8s} {'✅ 已配置 ' + config.mask(k) if k else '❌ 未配置'}"
+                  f"    ({spec.key_hint})")
         return 0
     if args.doctor:
         from .core import doctor

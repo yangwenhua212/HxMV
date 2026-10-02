@@ -196,6 +196,12 @@ class ProviderRoutingTest(unittest.TestCase):
         os.environ["HOME"] = self._tmp_home
         os.environ["USERPROFILE"] = self._tmp_home
         os.environ.pop("HXMV_CONFIG", None)
+        # config.CONFIG_PATH 是**导入时**算好的常量：只改 HOME 挡不住它已经指向真实配置。
+        # 必须显式重定向（不然「没配 Key 时回落 local」这条在有 Key 的机器上必红）。
+        from hxmv.core import config as _cfg
+        self._saved_cfg_path = _cfg.CONFIG_PATH
+        os.environ["HXMV_CONFIG"] = os.path.join(self._tmp_home, "config.json")
+        _cfg.CONFIG_PATH = os.environ["HXMV_CONFIG"]
 
     def tearDown(self):
         if self._saved is None:
@@ -207,6 +213,8 @@ class ProviderRoutingTest(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        from hxmv.core import config as _cfg
+        _cfg.CONFIG_PATH = self._saved_cfg_path
         shutil.rmtree(self._tmp_home, ignore_errors=True)
 
     def test_explicit_mock_is_never_downgraded(self):

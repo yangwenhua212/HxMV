@@ -321,6 +321,36 @@ mock 世界的缺陷是 executor 按概率"贴标签"的，Critic 读标签—�
 - Controller **只判断不动参数**——参数调整是 Refiner 的事
 - 一切以 `state` 为准：闭环的每次推进都改变 state，state 可审计、可续跑、可回放
 
+## 多 API：注册表 + 公共实现 + 薄适配器（v0.10）
+
+**设计目标（老大定的方向）**：HxMV 要能对接**多个 API，而不只是一家**；代价是代码得高效简洁，
+不许堆——加一家 API 应该是「写一个文件 + 加一条表项」，不是「改八个地方」。
+
+三层，各有唯一职责：
+
+| 层 | 文件 | 管什么 | 不管什么 |
+|---|---|---|---|
+| **注册表** | `providers/registry.py` | 有哪几家、怎么建（模块/类）、Key 从哪来、有哪些档位（中文名 + 单价）、默认档 | 不提任何能力声明 |
+| **公共实现** | `providers/api_video.py`（`ApiVideoProvider`） | 档案复用、参考图解析、首帧生成、尾帧派生、指纹与缓存、工程修正（音量/黑场）、结果登记、HTTP/轮询骨架 | 不认任何一家 API 的字段 |
+| **适配器** | `zhipu_video.py` / `agnes_video.py` | **只有五处差异**：`_submit_body` / `_poll_url` / `_image_body` / `download_auth` / 能力与档位表 |
+
+**为什么能力声明（`camera_support` / `MAX_DURATION` / `FIRST_LAST_MODELS`）放在适配器类、不放注册表**：
+注册表是「配置」，能力是「模型的事实」。声明错了，闭环会照它挑运镜落点、照它钳制时长
+（声明了首尾帧却做不到 → 判据判死好片），所以它必须贴着实现在一起、由改那家的人改。
+
+**消费方一律读表，不许再写名字**：`core/executor.py`（工厂 + `_auto_provider`）、
+`server.py`（`/api/config`、`/api/run` 校验、健康检查）、`__main__.py`（`--provider` / `--set-key` /
+`--default` / `--key-status`）、`core/doctor.py`、`core/llm.py`（大脑跟哪家走）、
+`web/index.html`（设置页每张卡由 `/api/config` 渲染）。`tests/test_providers.py` 守着这条。
+
+**大脑跟着哪家走**（`llm.active_provider()`）：本轮 `HXMV_PROVIDER`（能出图的真 API 那家）→
+面板选的默认家 → 第一个配了 Key 的家。`local`/`fake` 没有 base/Key，自动跳过——
+所以 `--provider local` 跑本地渲染时，规划/评审仍用已经配好的那家 LLM，不会退回 Mock。
+
+**免费档是免费档，别当它是「便宜的生产档」**：Agnes 免费档文本 10 次/分钟、视频排队 + 限流
+（实测连投 429 / `video_queue_full`）。适配器把 429/503 都当**基础设施失败**（`retryable=True`），
+闭环的熔断器会在连续失败后停下——这是对的：限流不是片子不好，不该拿 Refiner 去修。
+
 ## 编剧与运镜（v0.9）：把「会拍」拆成规格 / 落点 / 判据
 
 老大 2026-09 的原话：「相当于 hxmv 会自己写剧情和视频画面的流畅度和场景适配度，不要出来怪怪的」。

@@ -35,9 +35,9 @@ RUNS_DIR = os.path.expanduser("~/.hxmv/runs")
 SPEND_FILE = os.path.expanduser(os.environ.get("HXMV_SPEND_FILE", "~/.hxmv/mcp_spend.json"))
 AUDIT_FILE = os.path.expanduser(os.environ.get("HXMV_AUDIT_FILE", "~/.hxmv/mcp_audit.log"))
 
-# 只有这些档位是「不花钱」的；未知档位一律当付费（fail-safe：宁可不跑，不许悄悄烧钱）
-FREE_VIDEO_MODELS = {"cogvideox-flash"}
-KNOWN_PROVIDERS = {"zhipu", "kling", "local"}
+# 名单与「免费档」都从面板的 /api/config 拿（服务端注册表是唯一真相）。
+# **本进程只做 HTTP 转发、不 import 内核**：HxMV 是有状态的一人一实例内核，
+# 第二个进程 import 它会抢状态与产物目录（这是设计铁律）。
 RUN_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$")
 
 
@@ -98,11 +98,44 @@ def _local_paths(run_id: str) -> list[dict]:
     return items
 
 
-def _video_model() -> str:
-    """当前视频档位。查不到就返回空串 —— 调用方把空串当「付费」处理（fail-safe）。"""
+def _known_providers() -> set:
+    """可用的生成器名单（面板注册表）。取不到就退回内置的几个。"""
     try:
         cfg = _req("/api/config", timeout=15)
-        return str(((cfg.get("options") or {}).get("video_model") or "")).strip()
+        return {g["id"] for g in cfg.get("generators") or [] if g.get("id")}
+    except Exception:
+        return {"zhipu", "agnes", "local"}
+
+
+def _free_video_models() -> set:
+    """标了「免费/限免」的视频档；取不到返回空集 = 全部当付费（fail-safe：宁可不跑，别悄悄烧钱）。"""
+    try:
+        cfg = _req("/api/config", timeout=15)
+        out = set()
+        for p in cfg.get("providers") or []:
+            for opt in p.get("options") or []:
+                if opt.get("name") == "video_model":
+                    out |= {c.get("id") for c in opt.get("choices") or []
+                            if "免费" in str(c.get("cost") or "")}
+        return out
+    except Exception:
+        return set()
+
+
+def _video_model() -> str:
+    """当前会用的视频档位（设置页里**默认那家**的档位）。
+
+    查不到就返回空串 —— 调用方把空串当「付费」处理（fail-safe）。
+    """
+    try:
+        cfg = _req("/api/config", timeout=15)
+        default = str(cfg.get("default") or "").strip()
+        for p in cfg.get("providers") or []:
+            if p.get("id") == default or (not default and p.get("configured")):
+                for opt in p.get("options") or []:
+                    if opt.get("name") == "video_model":
+                        return str(opt.get("current") or opt.get("default") or "").strip()
+        return ""
     except RuntimeError:
         return ""
 
@@ -175,20 +208,21 @@ def create_mcp():
 
         goal       : 可执行目标（建议先 hxmv_chat 拿到 goal 再传进来）。
         project    : 可选，项目名。
-        provider   : 可选，视频后端（zhipu / kling / local）。
+        provider   : 可选，视频后端（见注册表：zhipu / agnes / local …）。
         allow_paid : 付费档位必须显式传 true 才开工（免费档不用传）。付费档有每日上限。
 
         返回 JSON：run_id。之后用 hxmv_watch / hxmv_files 跟进。
         """
-        if provider and provider not in KNOWN_PROVIDERS:
-            return f"失败：provider 只能是 {sorted(KNOWN_PROVIDERS)} 之一"
+        known = _known_providers()
+        if provider and provider not in known:
+            return f"失败：provider 只能是 {sorted(known)} 之一"
         model = _video_model()
-        paid = model not in FREE_VIDEO_MODELS          # 未知档位也算付费（fail-safe）
+        paid = model not in _free_video_models()       # 未知档位也算付费（fail-safe）
         if paid and not allow_paid:
             return _out({
                 "stopped": True,
                 "reason": f"当前视频档位是 {model or '未知'}（按次计费），未开工",
-                "how_to_proceed": "确认要按次出片就再调一次并带 allow_paid=true（免费档 cogvideox-flash 不用）",
+                "how_to_proceed": "确认要按次出片就再调一次并带 allow_paid=true（标了免费/限免的档位不用）",
                 "paid_today": _spend_today(),
                 "daily_cap": int(os.environ.get("HXMV_MAX_PAID_PER_DAY", "5")),
             })

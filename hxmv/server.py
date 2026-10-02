@@ -45,8 +45,10 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from . import __version__
 from .core.brain import Brain
 from .core.loop import run
+from .providers import registry
 
 RUNS_DIR = os.path.expanduser("~/.hxmv/runs")
 DL_DIR = os.environ.get("HXMV_DL_DIR", os.path.expanduser("~/.hxmv/dl"))
@@ -85,7 +87,8 @@ REF_KINDS = ("character", "scene")
 # 按磁盘列产物时认哪些后缀（面板的成片/镜头/参考图展示用）
 MEDIA_EXTS = (".mp4", ".png", ".jpg", ".jpeg", ".webp")
 
-PROVIDERS = {"mock": "", "fake": "fake", "local": "local", "zhipu": "zhipu", "kling": "kling"}
+# 生成器名单 = 注册表（面板/校验/健康检查都读它 —— 加一家 API 不用改 server）
+PROVIDERS = {"mock": "mock", **{spec.id: spec.id for spec in registry.SPECS.values()}}
 
 
 
@@ -378,7 +381,8 @@ def _scan_runs() -> list[dict]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HxMV/0.6"
+    # HTTP `Server` 头与面板「已连接 · xxx」都显示它：**跟包版本走**，别再手写一个会过期的号
+    server_version = f"HxMV/{__version__}"
 
     # ---- helpers ----
     def _send_json(self, obj, code: int = 200) -> None:
@@ -507,20 +511,27 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if p == "/api/config":
-            # 接口配置（面板设置页用）：只回**脱敏**状态，明文 Key 永不回传
+            # 接口配置（面板设置页用）：只回**脱敏**状态，明文 Key 永不回传。
+            # 有哪几家、每家有哪些档位 = 注册表说了算（加一家 API 不用改这里）。
             if not self._authed():
                 self._send_err(401, "unauthorized：需要 ?token= 或 X-Hxmv-Token 头")
                 return
             from .core import config, llm
             providers = []
-            for pid, name in (("zhipu", "智谱 AI"), ("kling", "可灵")):
-                k = config.api_key(pid)
-                providers.append({"id": pid, "name": name,
-                                  "configured": bool(k), "masked": config.mask(k) if k else ""})
+            for spec in registry.api_specs():
+                item = spec.panel()
+                k = config.api_key(spec.id)
+                item.update({"configured": bool(k), "masked": config.mask(k) if k else "",
+                             "is_default": config.default_provider() == spec.id})
+                for opt in item["options"]:
+                    opt["current"] = config.option(spec.id, opt["name"]) or opt["default"]
+                providers.append(item)
             self._send_json({
                 "providers": providers,
-                "options": {"video_model": config.option("zhipu", "video_model") or "cogvideox-flash",
-                            "vlm_model": config.option("zhipu", "vlm_model") or llm.ZHIPU_VISION_MODEL},
+                "default": config.default_provider(),
+                "generators": [{"id": "mock", "name": "模拟世界（不出真文件）", "ready": True}]
+                              + [{"id": s.id, "name": s.label, "ready": registry.configured(s.id)}
+                                 for s in registry.SPECS.values() if not s.stub],
                 "vision": {"ready": llm.vision_available(), "model": llm.vision_model()},
             })
             return
@@ -580,8 +591,7 @@ class Handler(BaseHTTPRequestHandler):
                 "encoder": probe.encoder_name() if probe.has_ffmpeg() else None,
                 # 视觉评审是否真的开着（L2 身份判定 / L3 语义评审靠它；没开=结果里会标注未做视觉检查）
                 "vision": {"ready": llm.vision_available(), "model": llm.vision_model()},
-                "providers": {name: {"ready": True if name == "mock" or name == "local"
-                                     else config.configured(name)}
+                "providers": {name: {"ready": name == "mock" or registry.configured(name)}
                               for name in PROVIDERS},
                 "projects": [{"id": x.get("id"), "episodes": x.get("episodes")} for x in projects]
                             if authed else [],
@@ -859,16 +869,20 @@ class Handler(BaseHTTPRequestHandler):
             from .core import config, llm
             body = self._read_body()
             provider = str(body.get("provider", "")).strip().lower()
-            if provider not in ("zhipu", "kling"):
-                self._send_err(400, "不支持的 provider")
+            spec = registry.get(provider)
+            if not (spec and spec.needs_key):
+                self._send_err(400, f"不支持的 provider: {provider or '（空）'}")
                 return
             if str(body.get("key", "")).strip():
-                config.set_api_key(provider, str(body["key"]))
-            for opt in ("video_model", "vlm_model"):
-                if opt in body:
-                    config.set_option(provider, opt, str(body.get(opt, "")))
-            self._send_json({"ok": True, "vision": {"ready": llm.vision_available(),
-                                                   "model": llm.vision_model()}})
+                config.set_api_key(spec.id, str(body["key"]))
+            for opt in spec.panel()["options"]:            # 档位名只认注册表（加一档不用改这里）
+                if opt["name"] in body:
+                    config.set_option(spec.id, opt["name"], str(body.get(opt["name"], "")))
+            if body.get("default"):
+                config.set_default_provider(spec.id)
+            self._send_json({"ok": True, "default": config.default_provider(),
+                             "vision": {"ready": llm.vision_available(),
+                                        "model": llm.vision_model()}})
             return
         if u.path == "/api/chat":
             # 对话入口（老大要求「hxmv 也需要可以聊天」）：一句话 → 回话 + 可执行目标。
@@ -1010,7 +1024,7 @@ class Handler(BaseHTTPRequestHandler):
         # 不传 = 交给内核自动选（有真 Key 就用真视频，别默默给假视频）；
         # 显式传 mock = 真的要模拟世界（离线/demo）。
         raw_provider = str(body.get("provider") or "").strip().lower()
-        provider = "mock" if raw_provider == "mock" else PROVIDERS.get(raw_provider, "")
+        provider = PROVIDERS.get(raw_provider, "")
         project = str(body.get("project", "")).strip()
         run_id = MANAGER.submit(goal, provider, project)
         self._send_json({"run_id": run_id, "provider": provider or "auto",
