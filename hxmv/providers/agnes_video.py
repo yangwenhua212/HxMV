@@ -40,9 +40,10 @@ class AgnesVideoProvider(ApiVideoProvider):
     MAX_DURATION = {"agnes-video-2.5-flash": 12.0, "agnes-video-2.5": 12.0}
     # 免费档排队实测要 10 分钟上下才出片（旧默认 420s 会在排队中就被判超时、白重投一次）
     DEFAULT_TIMEOUT = 900.0
-    # 免费档视频队列常满（实测连投十几次才挤进去）——项目约定「免费就行不怕等」，
-    # 所以这里默认耐心等：排队就退避重试，最多 30 分钟，不因为一次 503 就把镜头判死。
-    SUBMIT_WAIT = 1800.0
+    # 免费档视频队列常满（实测连投十几次才挤进去，也见过连续 23 分钟排不上）——项目约定
+    # 「免费就行不怕等」+「扔到低峰时段跑」：外面排队就先park到低峰窗口，窗口内最多再等 2 小时。
+    SUBMIT_WAIT = 7200.0
+    NIGHT_FIRST = True
 
     def _image_body(self, prompt: str, ratio: str) -> dict:
         # size 是**档位**不是像素；不给 ratio 会按 1:1 出图

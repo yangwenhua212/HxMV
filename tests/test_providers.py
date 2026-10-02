@@ -312,6 +312,56 @@ class AgnesAdapterTest(_Isolated):
         self.assertGreater(AgnesVideoProvider.SUBMIT_WAIT, 0)
         self.assertGreater(AgnesVideoProvider.DEFAULT_TIMEOUT, 420)
 
+    def test_night_window_parsing_and_inside_outside(self):
+        """低峰窗口：在里面 = 不用等；在外面 = 等到窗口开始；跨零点的窗口也要算对。"""
+        from datetime import datetime, timedelta
+        from hxmv.providers.api_video import seconds_until_window
+        base = datetime.now().replace(second=0, microsecond=0)
+
+        def ts(minutes):
+            return (base + timedelta(minutes=minutes)).timestamp()
+
+        # 窗口 02:00-06:00（相对「现在」算，跟真实时刻无关）
+        start = 120   # 2 小时后
+        end = 300     # 5 小时后
+        win = f"{(base + timedelta(minutes=start)).strftime('%H:%M')}-" \
+              f"{(base + timedelta(minutes=end)).strftime('%H:%M')}"
+        self.assertAlmostEqual(seconds_until_window(win, ts(60)), 60 * 60, delta=90)   # 还没到，等 1 小时
+        self.assertEqual(seconds_until_window(win, ts(180)), 0.0)                      # 已在窗口内
+        self.assertEqual(seconds_until_window("", ts(0)), 0.0)                         # 关掉低峰策略
+        self.assertEqual(seconds_until_window("乱写", ts(0)), 0.0)                      # 坏值当没有
+        # 跨零点：23:30-01:00，在 00:30 时应该在窗口内
+        self.assertEqual(seconds_until_window("23:30-01:00",
+                                              datetime.now().replace(hour=0, minute=30).timestamp()), 0.0)
+
+    def test_free_tier_parks_until_night_window(self):
+        """不在低峰时段又排不上队 → 先park到窗口开始（而不是在高峰期干等烧时间）。"""
+        from datetime import datetime, timedelta
+        from unittest import mock
+        from hxmv.providers.agnes_video import AgnesVideoProvider
+        from hxmv.providers.base import ProviderError
+        p = AgnesVideoProvider(api_key="sk-test", outdir=self._tmp)
+        p.SUBMIT_WAIT = 3600.0
+        ahead = datetime.now() + timedelta(hours=3)
+        os.environ["HXMV_NIGHT_WINDOW"] = f"{ahead.strftime('%H:%M')}-23:59" \
+            if ahead.hour < 23 else "02:00-06:00"
+        calls = {"n": 0}
+
+        def flaky(task, prompt, frames):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise ProviderError("HTTP 503 video_queue_full", retryable=True)
+            return {"video_id": "video_ok"}
+
+        p._submit = flaky
+        with mock.patch("hxmv.providers.api_video.time.sleep") as sleepy:
+            out = p._submit_patient(None, "p", [])
+        self.assertEqual(out["video_id"], "video_ok")
+        self.assertEqual(calls["n"], 2)
+        parked_for = sleepy.call_args_list[0].args[0]
+        self.assertGreater(parked_for, 60)          # 是「等到窗口」那一段，不是普通退避 20s
+        self.assertLessEqual(parked_for, 300)       # 分段睡，单次不超过 5 分钟
+
     def test_two_providers_share_one_artifact_lock(self):
         """产物基线帧同名同路径：锁必须跨 provider 共用（各持一把等于没锁）。"""
         from hxmv.providers import base, local_render

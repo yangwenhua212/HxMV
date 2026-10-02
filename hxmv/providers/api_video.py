@@ -34,6 +34,35 @@ from .base import SHARED_FILE_LOCK, ProviderError, VideoProvider
 from . import registry
 
 
+def _window_minutes(spec: str) -> tuple[int, int] | None:
+    """解析 `HH:MM-HH:MM` 低峰窗口 → (起始分钟, 结束分钟)；支持跨零点（如 23:00-02:00）。"""
+    try:
+        left, right = str(spec).split("-")
+        hh, mm = (int(x) for x in left.strip().split(":"))
+        h2, m2 = (int(x) for x in right.strip().split(":"))
+        return hh * 60 + mm, h2 * 60 + m2
+    except Exception:
+        return None
+
+
+def seconds_until_window(spec: str, now_ts: float) -> float:
+    """距离**低峰窗口开始**还有多少秒；已经在窗口里 → 0；窗口无效 → 0（就当没有低峰概念）。
+
+    低峰时段是给免费档用的：队列常满时，与其在高峰期干等，不如把它挪到平台空闲的时段。
+    """
+    win = _window_minutes(spec)
+    if not win:
+        return 0.0
+    start, end = win
+    t = time.localtime(now_ts)
+    cur = t.tm_hour * 60 + t.tm_min
+    inside = (start <= cur < end) if start <= end else (cur >= start or cur < end)
+    if inside:
+        return 0.0
+    delta = (start - cur) % 1440          # 到今天的窗口，不够就滚到明天
+    return float(delta) * 60.0
+
+
 def _data_url(path: str) -> str:
     """本地图片 → base64 data URL。
 
@@ -96,6 +125,11 @@ class ApiVideoProvider(VideoProvider):
     # 0 = 不等（有额度、能立刻提交的家保持原样）；免费档要排队的家在自己适配器里调大。
     # 可用 HXMV_SUBMIT_WAIT（秒）覆盖。**等的时候会把「已等/上限」打出来**——界面不能看着像卡死。
     SUBMIT_WAIT = 0.0
+    # 「扔到低峰时段跑」：NIGHT_FIRST 的家在队列满时，如果当前不在低峰窗口内，
+    # 就先park到窗口开始再重试（免费档的高峰期可能就是一直排不上）。
+    # 窗口 `HH:MM-HH:MM`（支持跨零点），空串 = 关闭；HXMV_NIGHT_WINDOW 可覆盖。
+    NIGHT_FIRST = False
+    NIGHT_WINDOW = "02:00-06:00"
     _CONGESTION = ("429", "503", "queue", "rate limit", "too many", "try again")
     action_map = {"GENERATE_SHOT": "video", "GENERATE_CHARACTER": "image",
                   "GENERATE_SCENE": "image", "COMPOSE": "concat"}
@@ -378,23 +412,42 @@ class ApiVideoProvider(VideoProvider):
         return any(k in text for k in self._CONGESTION)
 
     def _submit_patient(self, task, prompt: str, frames: list) -> dict:
-        """提交任务；被上游按回（429/队列满）就在窗口内退避重试，直到成功或窗口用尽。
+        """提交任务；被上游按回（429/队列满）就等——**低峰时段优先，窗口内退避重试**。
 
         免费档队列常满是**上游的容量问题**，不是这一镜拍砸了——按基础设施错误处理（不退 Refiner、
-        不判 TERMINAL_FAIL），等得起就等。窗口用尽仍失败 → 照旧抛 retryable，交给闭环的熔断器。
+        不判 TERMINAL_FAIL）。两条策略叠着用：
+          ① `NIGHT_FIRST` 的家：不在低峰窗口内就**先park到窗口开始**（高峰期干等没意义）；
+          ② 在窗口内（或家没开低峰策略）：退避重试到 `SUBMIT_WAIT` 用尽。
+        用尽仍失败 → 照旧抛 retryable，交给闭环的熔断器。
         """
         wait = float(os.environ.get("HXMV_SUBMIT_WAIT") or self.SUBMIT_WAIT)
+        window = os.environ.get("HXMV_NIGHT_WINDOW", self.NIGHT_WINDOW) if self.NIGHT_FIRST else ""
+        park_max = float(os.environ.get("HXMV_PARK_MAX", "43200") or 0)      # 最多 park 12 小时
+        park_deadline = time.time() + park_max
         deadline = time.time() + wait
         delay = 20.0
+        parked = False
         while True:
             try:
                 return self._submit(task, prompt, frames)
             except ProviderError as e:
-                if not (e.retryable and self._congested(e)) or time.time() >= deadline:
+                if not (e.retryable and self._congested(e)):
                     raise
-                left = max(0.0, deadline - time.time())
+                now = time.time()
+                if window:
+                    left_to_window = seconds_until_window(window, now)
+                    if left_to_window > 0 and now + left_to_window <= park_deadline:
+                        if not parked:      # 只喊一次，别刷屏
+                            print(f"⏳ 队列满，且现在不在低峰时段（{window}）："
+                                  f"等到 {left_to_window / 60:.0f} 分钟后再试")
+                            parked = True
+                        time.sleep(min(left_to_window, 300))     # 分段睡：便于看进度、也能被打断
+                        continue
+                if now >= deadline:
+                    raise
+                left = max(0.0, deadline - now)
                 print(f"⏳ 上游排队/限流：{delay:.0f}s 后再试（已等 "
-                      f"{(time.time() - (deadline - wait)) / 60:.1f} 分 / 上限 {wait / 60:.0f} 分）")
+                      f"{(now - (deadline - wait)) / 60:.1f} 分 / 上限 {wait / 60:.0f} 分）")
                 time.sleep(min(delay, left + 1))
                 delay = min(delay * 1.6, 180.0)
 
