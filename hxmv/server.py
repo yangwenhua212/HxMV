@@ -472,6 +472,49 @@ def _mark_orphans() -> None:
             continue
 
 
+def _tail_event(path: str, chunk: int = 65536) -> dict | None:
+    """读 events.jsonl 最后一个**完整**事件。
+
+    坑（实测复现）：进程正往文件里追加时，读到的最后一行可能是**写了一半的半行**，
+    json.loads 抛错 → 老代码整条 run 被 continue 掉 → /api/runs 里它**凭空消失**。
+    真机上「明明在跑，一刷新就没了」就是这个；部署守望也因此误判过一次，
+    把一条正在出片的 run 当成跑完，重启面板把它打断了。
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - chunk)
+            f.seek(start)
+            data = f.read().decode("utf-8", "ignore")
+    except OSError:
+        return None
+    lines = [ln for ln in data.splitlines() if ln.strip()]
+    if start > 0 and lines:
+        lines = lines[1:]                    # 首行可能是被截断的半行
+    for ln in reversed(lines):               # 从后往前找第一个能解析的完整事件
+        try:
+            return json.loads(ln)
+        except ValueError:
+            continue
+    return None
+
+
+def _head_event(path: str) -> dict | None:
+    """读 events.jsonl 第一个事件（首行写坏时容忍，不让整条 run 消失）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for ln in f:
+                if ln.strip():
+                    try:
+                        return json.loads(ln)
+                    except ValueError:
+                        continue
+    except OSError:
+        return None
+    return None
+
+
 def _scan_runs() -> list[dict]:
     """扫描磁盘 runs 目录，读每个 events.jsonl 首/尾行出摘要。"""
     out = []
@@ -481,31 +524,10 @@ def _scan_runs() -> list[dict]:
         path = os.path.join(RUNS_DIR, name, "events.jsonl")
         if not os.path.isfile(path):
             continue
-        head = tail = None
-        try:
-            with open(path, encoding="utf-8") as f:
-                first = f.readline()
-                head = json.loads(first) if first.strip() else None
-                # 尾行：从文件尾向前找最后一个非空行
-                f.seek(0, 2)
-                size = f.tell()
-                buf = b""
-                pos = size
-                while pos > 0:
-                    pos = max(0, pos - 4096)
-                    f.seek(pos)
-                    chunk = f.read(min(4096, size - pos))
-                    buf = chunk.encode("utf-8", "ignore") + buf
-                    lines = buf.decode("utf-8", "ignore").strip().splitlines()
-                    if len(lines) > 1:
-                        tail = json.loads(lines[-1])
-                        break
-                if tail is None and head is not None:
-                    tail = head
-        except (OSError, ValueError, json.JSONDecodeError):
+        head = _head_event(path)
+        if head is None:                     # 真的读不出来才跳过（坏行/半行都不算）
             continue
-        if head is None:
-            continue
+        tail = _tail_event(path) or head
         # 三种状态：跑完 / 正在跑 / 被中断（没 run.done 又不在活跃集合里 = 服务重启等打断的残留）
         if tail and tail.get("type") == "run.done":
             status = "done"
@@ -942,8 +964,12 @@ class Handler(BaseHTTPRequestHandler):
             events = []
             with open(path, encoding="utf-8") as f:
                 for line in f:
-                    if line.strip():
+                    if not line.strip():
+                        continue
+                    try:
                         events.append(json.loads(line))
+                    except ValueError:
+                        continue      # 正在写的那半行：跳过，别让回放整条 500
             # 状态要看"事件里有没有 run.done"，而不是"最后一条是不是 run.done"——
             # 收尾之后还会有 notify 之类的事件（实测踩过：notify 一加，状态永远停在 running）
             status = "done" if any(e.get("type") == "run.done" for e in events) else "running"

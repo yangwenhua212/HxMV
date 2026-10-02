@@ -103,6 +103,53 @@ class ScanImagesTest(unittest.TestCase):
             self.assertIsNone(srv._IMAGE_REL_RE.match(bad), bad)
 
 
+# ------------------------------------------------- run 正在写时不许「消失」
+class ScanRunsRaceTest(unittest.TestCase):
+    def test_scan_runs_tolerates_half_written_last_line(self):
+        """实测复现过的坑：往 events.jsonl 追加的瞬间读到写了一半的行，
+        老代码 json.loads 抛错 → 整条 run 被跳过 → 面板上「明明在跑，一刷新就没了」。
+
+        修法：首/尾行读法都容忍半行，坏行跳过、往前找完整的。
+        """
+        import json as _json
+        from hxmv import server as srv
+
+        old_runs, old_active = srv.RUNS_DIR, srv.ACTIVE_RUNS
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                srv.RUNS_DIR = tmp
+                run_dir = os.path.join(tmp, "20260101-000000-bbbb")
+                os.makedirs(run_dir)
+                path = os.path.join(run_dir, "events.jsonl")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(_json.dumps({"ts": 1, "type": "run.start", "goal": "半行测试"}) + "\n")
+                    f.write(_json.dumps({"ts": 2, "type": "task.start", "action": "GENERATE_SHOT"}) + "\n")
+                    f.write('{"ts": 3, "type": "cri')          # 写了一半就被读到了
+                srv.ACTIVE_RUNS = {"20260101-000000-bbbb"}
+                runs = srv._scan_runs()
+                self.assertEqual(len(runs), 1, "半行不该让整条 run 从列表里消失")
+                self.assertEqual(runs[0]["status"], "running")
+                self.assertEqual(runs[0]["tail"]["action"], "GENERATE_SHOT")
+                self.assertEqual(runs[0]["goal"], "半行测试")
+                # 不在活跃集合里 → 如实标为被打断，而不是装作在跑
+                srv.ACTIVE_RUNS = set()
+                self.assertEqual(srv._scan_runs()[0]["status"], "aborted")
+        finally:
+            srv.RUNS_DIR, srv.ACTIVE_RUNS = old_runs, old_active
+
+    def test_tail_event_skips_bad_lines(self):
+        from hxmv import server as srv
+
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
+            f.write('{"ts": 1, "type": "run.start"}\n')
+            f.write("{坏行\n")
+            path = f.name
+        try:
+            self.assertEqual(srv._tail_event(path)["type"], "run.start")
+        finally:
+            os.unlink(path)
+
+
 # ---------------------------------------------------------------- 首帧裁切
 class CropBoxTest(unittest.TestCase):
     def test_keep_returns_full_image(self):
