@@ -328,6 +328,35 @@ def _poster_for(run_id: str) -> str:
     return ""
 
 
+def _mark_orphans() -> None:
+    """启动时给上次没跑完的 run 补一条「被打断 + 原因」。
+
+    服务重启会把在跑的 loop 连同线程一起带走，磁盘上就只剩半截 events.jsonl，
+    列表里只显示「已中断」——用户会以为项目凭空消失。这里把原因和后路写清楚。
+    """
+    if not os.path.isdir(RUNS_DIR):
+        return
+    for name in os.listdir(RUNS_DIR):
+        path = os.path.join(RUNS_DIR, name, "events.jsonl")
+        if not os.path.isfile(path) or name in ACTIVE_RUNS:
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = [ln for ln in f.read().splitlines() if ln.strip()]
+            if not lines:
+                continue
+            if json.loads(lines[-1]).get("type") in ("run.done", "run.aborted"):
+                continue
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": time.time(),
+                    "type": "run.aborted",
+                    "reason": "面板服务重启，这条被打断了（分镜/产物都还在，可以「重跑」再来一次）",
+                }, ensure_ascii=False) + "\n")
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+
+
 def _scan_runs() -> list[dict]:
     """扫描磁盘 runs 目录，读每个 events.jsonl 首/尾行出摘要。"""
     out = []
@@ -1114,6 +1143,7 @@ def main() -> None:
     args = ap.parse_args()
 
     os.makedirs(RUNS_DIR, exist_ok=True)
+    _mark_orphans()      # 启动先把上次被打断的 run 标上原因（免得用户以为项目消失了）
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
     print(f"HxMV Web 控制台 → http://{args.host}:{args.port}")

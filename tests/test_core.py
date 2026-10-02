@@ -37,6 +37,37 @@ from hxmv.media.probe import THRESHOLDS, detect_defects
 from hxmv.media.sheet import crop_box
 
 
+# ------------------------------------------------- 「被打断的 run」要说得清原因
+class MarkOrphansTest(unittest.TestCase):
+    def test_mark_orphans_writes_reason_once(self):
+        """服务重启带走正在跑的 loop：启动时要补一条带原因的 run.aborted。
+
+        否则作品列表只剩「已中断」，用户会以为项目凭空消失（真机反馈过）。
+        """
+        import json as _json
+        from hxmv import server as srv
+
+        old = srv.RUNS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                srv.RUNS_DIR = tmp
+                run_dir = os.path.join(tmp, "20260101-000000-aaaa")
+                os.makedirs(run_dir)
+                path = os.path.join(run_dir, "events.jsonl")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(_json.dumps({"ts": 1, "type": "task.start", "goal": "半截"}) + "\n")
+                srv.ACTIVE_RUNS = set()
+                srv._mark_orphans()
+                lines = open(path, encoding="utf-8").read().strip().splitlines()
+                tail = _json.loads(lines[-1])
+                self.assertEqual(tail["type"], "run.aborted")
+                self.assertIn("重启", tail["reason"])
+                srv._mark_orphans()          # 幂等：第二次不再重复追加
+                self.assertEqual(len(open(path, encoding="utf-8").read().strip().splitlines()), 2)
+        finally:
+            srv.RUNS_DIR = old
+
+
 # ---------------------------------------------------------------- 首帧裁切
 class CropBoxTest(unittest.TestCase):
     def test_keep_returns_full_image(self):

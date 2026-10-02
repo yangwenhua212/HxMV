@@ -329,6 +329,8 @@
         <div class="hero-sub">说一句想做什么，它自己去拍、去剪、去修</div>
       </div>
 
+      <div id="activeBox" hidden></div>
+
       <div class="pill-list" id="pillList">
         <button class="pill" data-act="seedance"><span class="pi">⚡</span>沉浸式短片 · 真视频生成<span class="tag">免费</span></button>
         <button class="pill" data-act="focus"><span class="pi">▶</span>输入灵感，智能生视频</button>
@@ -653,9 +655,10 @@ async function refreshRuns() {
       const t = r.tail || {};
       const st = r.status === "done" ? "done" : (r.status === "aborted" ? "aborted" : "running");
       const label = st === "done" ? "完成" : st === "aborted" ? "已中断" : "生成中";
+      const why = (t && t.reason) ? String(t.reason) : "";      // 中断原因（服务重启等）
       const stat = st === "done"
         ? `${(t.completed || []).length} 完成 · ${(t.failed || []).length} 失败 · 尝试 ${t.attempts}`
-        : st === "aborted" ? "被打断（可重跑）" : "进行中…";
+        : st === "aborted" ? (why || "被打断（可重跑）") : "进行中…";
       // 封面：成片/镜头抽第一帧当缩略图（#t=0.1 让浏览器直接渲染出画面，别只给黑框）
       const poster = r.poster ? artUrl(r.run_id, r.poster) : "";
       const isVid = !!r.poster && r.poster.toLowerCase().endsWith(".mp4");
@@ -671,11 +674,14 @@ async function refreshRuns() {
           <span class="s">${r.ts ? fmt(r.ts) : ""} · ${stat}</span>
           <div class="vacts">
             <button onclick="event.stopPropagation();replay('${r.run_id}')">打开</button>
+            ${st === "aborted" ? `<button onclick="event.stopPropagation();rerun('${r.run_id}')">重跑</button>` : ""}
             <button class="del" onclick="event.stopPropagation();discardRun('${r.run_id}')">删掉</button>
           </div>
         </div></div>`;
     }).join("");
     lazyThumbs();                        // 封面只在进入视口时才去取（手机省流量）
+    runs.forEach(r => { RUN_GOALS[r.run_id] = r.goal || ""; });   // 重跑要用原目标
+    renderActiveFrom(runs);
   } catch (e) {
     $("runsList").innerHTML = `<div class="empty" style="grid-column:1/-1">${TOKEN ? "连不上" : "未填令牌"}</div>`;
   }
@@ -838,6 +844,7 @@ async function submitRun() {
 function startStream(runId) {
   if (es) es.close();
   currentRun = runId;
+  try { localStorage.setItem("hxmvRun", runId); } catch (e) {}   // 记住「在做哪条」：退出/刷新回来能接上
   const tl = $("timeline");
   tl.innerHTML = ""; $("sumBox").style.display = "none";
   $("taskBox").hidden = false;
@@ -847,7 +854,10 @@ function startStream(runId) {
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
     renderEvent(ev, tl);
-    if (ev.type === "run.done") { showSummary(ev, runId); collapseProc(tl); }
+    if (ev.type === "run.done") {
+      showSummary(ev, runId); collapseProc(tl);
+      try { localStorage.removeItem("hxmvRun"); } catch (e) {}
+    }
   };
   es.onerror = () => {};
 }
@@ -903,6 +913,47 @@ function paintArts(files, runId, rows) {
 }
 
 // ---------- 回放 ----------
+// ---------- 「正在做」：记住 / 接回 / 重跑 ----------
+const RUN_GOALS = {};                 // run_id → 目标（重跑要用）
+
+/** 首页那张「⏳ 正在做」卡：有活跃 run 就显示，点一下回到现场 */
+function renderActiveFrom(runs) {
+  const box = $("activeBox");
+  if (!box) return;
+  const live = (runs || []).find(r => r.status === "running");
+  if (!live) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = `<button class="pill" id="resumeBtn"><span class="pi">⏳</span>正在做：${esc((live.goal || "").slice(0, 16))} · 点回现场</button>`;
+  $("resumeBtn").onclick = () => { showPage("session"); startStream(live.run_id); };
+}
+
+/** 回到页面时：上次在看那条还在跑就自动接回去（SSE 先回放已落盘事件，过程不丢） */
+async function resumeIfRunning() {
+  let saved = null;
+  try { saved = localStorage.getItem("hxmvRun"); } catch (e) { return; }
+  if (!saved) return;
+  try {
+    const d = await apiGet("/api/runs");
+    const hit = (d.runs || []).find(r => r.run_id === saved);
+    if (hit && hit.status === "running") {
+      showPage("session");
+      startStream(saved);
+    } else {
+      try { localStorage.removeItem("hxmvRun"); } catch (e) {}   // 跑完/被打断：不再自动接
+    }
+  } catch (e) { /* 恢复失败不该拦住页面 */ }
+}
+
+/** 被中断的可以照原目标重跑（新的一条，产物另存） */
+function rerun(runId) {
+  const goal = RUN_GOALS[runId] || "";
+  if (!goal) { chatHint("这条没记下目标，手动写一句吧", true); return; }
+  showPage("session");
+  $("goalInput").value = goal;
+  chatHint("已填回原目标，点「开始生产」就来一遍");
+  $("goalInput").focus();
+}
+
 async function replay(runId) {
   const tl = $("timeline"); tl.innerHTML = ""; $("sumBox").style.display = "none";
   if (es) { es.close(); es = null; }
@@ -1396,6 +1447,7 @@ $("projectInput").addEventListener("blur", refreshRef);
 refreshConn();
 refreshBrain(); refreshRuns();
 refreshRef();
+resumeIfRunning();      // 退出前那条还在跑 → 回来自动接上
 
 // 大脑轮询：只在「创作/会话」页 + **页面在前台**时轮询。
 // 手机切后台/锁屏时不该继续发请求（费电、费流量），回到前台立刻补一次。
